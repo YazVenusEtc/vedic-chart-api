@@ -14,7 +14,7 @@ running the script by hand in Terminal.
 
 Endpoints:
   GET  /api/chart   -- returns chart data as JSON (positions, houses, etc.)
-  GET  /api/chart.svg -- returns the North Indian chart as an SVG image
+  GET  /api/chart-svg -- returns the North Indian chart as an SVG image
   GET  /health      -- simple check that the server is running
 
 This is a DEVELOPMENT server (Flask's built-in one). It is not meant to
@@ -297,7 +297,7 @@ def api_chart():
         return jsonify({"error": f"Unexpected error: {e}"}), 500
 
 
-@app.route("/api/chart.svg")
+@app.route("/api/chart-svg")
 def api_chart_svg():
     try:
         year, month, day, hour, minute, city = parse_birth_args(request.args)
