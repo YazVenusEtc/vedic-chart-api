@@ -171,7 +171,8 @@ def compute_natal_chart(year, month, day, hour, minute, city):
             "sign": SIGNS[(asc_sign_index + h - 1) % 12],
             "bodies": by_house_bodies[h],
             "aspects": [
-                {"name": name, "abbr": abbr, "degree": round(degree, 2)}
+                {"name": name, "display_name": DISPLAY_NAME.get(name, name),
+                 "abbr": abbr, "degree": round(degree, 2)}
                 for name, abbr, degree in aspects_by_house[h]
             ],
         })
@@ -237,31 +238,49 @@ def estimate_text_width(text, font_size, avg_char_ratio=0.56):
     return len(text) * font_size * avg_char_ratio
 
 
-def fit_font_size(text, max_width, candidates=(36, 32, 28, 26, 24, 22, 20, 18, 16, 14, 12, 10, 8)):
+def fit_font_size(text, max_width, candidates=(48, 44, 40, 36, 32, 28, 26, 24, 22, 20, 18, 16, 14, 12, 10, 8)):
     for size in candidates:
         if estimate_text_width(text, size) <= max_width:
             return size
     return candidates[-1]
 
 
-def generate_north_indian_chart_svg(chart_data, canvas_size=900):
+def _house_text_content(chart_data):
+    """Shared between the SVG and PDF chart drawers: for every house,
+    returns (header_text, resident_labels, aspect_label) using the
+    current formatting rules -- no 'House' word in the header (just
+    'N : Sign'), and aspect labels include each aspecting planet's
+    degree with no 'Asp:' prefix."""
     asc_sign = chart_data["ascendant"]["sign"]
+    asc_index = SIGNS.index(asc_sign)
+    house_sign = {h: SIGNS[(asc_index + h - 1) % 12] for h in range(1, 13)}
+
+    by_house = {h: [] for h in range(1, 13)}
+    by_house[1].append(("Ascendant", chart_data["ascendant"]["degree"]))
+    graha_placements = []
+    for p in chart_data["planets"]:
+        by_house[p["house"]].append((p["name"], p["degree"]))
+        graha_placements.append((p["name"], p["house"], p["degree"]))
+    aspects_by_house = compute_vedic_aspects(graha_placements)
+
+    content = {}
+    for house_num in range(1, 13):
+        header = f"{house_num} : {house_sign[house_num]}"
+        occupants = by_house[house_num]
+        resident_labels = [f"{PLANET_ABBR.get(n, n)} {d:.1f}\u00b0" for n, d in occupants]
+        aspecting = aspects_by_house[house_num]
+        aspect_label = (", ".join(f"{abbr} {deg:.1f}\u00b0" for _, abbr, deg in aspecting)
+                         if aspecting else None)
+        content[house_num] = (header, resident_labels, aspect_label)
+    return content
+
+
+def generate_north_indian_chart_svg(chart_data, canvas_size=1200):
     margin = canvas_size * 0.08
     side = canvas_size - 2 * margin
     x0 = y0 = margin
     houses = build_house_polygons(x0, y0, side)
-
-    by_house = {h: [] for h in range(1, 13)}
-    by_house[1].append(("Ascendant", chart_data["ascendant"]["degree"]))
-    graha_placements = []  # for aspect calc -- excludes Ascendant, it doesn't cast aspects
-    for p in chart_data["planets"]:
-        by_house[p["house"]].append((p["name"], p["degree"]))
-        graha_placements.append((p["name"], p["house"], p["degree"]))
-
-    aspects_by_house = compute_vedic_aspects(graha_placements)
-
-    asc_index = SIGNS.index(asc_sign)
-    house_sign = {h: SIGNS[(asc_index + h - 1) % 12] for h in range(1, 13)}
+    content = _house_text_content(chart_data)
 
     svg_lines = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{canvas_size}" '
@@ -271,6 +290,28 @@ def generate_north_indian_chart_svg(chart_data, canvas_size=900):
 
     HOUSE_HEADER_GREEN = "#2E7D4F"
 
+    # -- Pass 1: figure out the single font size that fits every house's
+    # own content, so every house renders at the SAME size (rather than
+    # each house independently fitting its own text, which produced
+    # visibly inconsistent sizes from house to house). --
+    per_house_geometry = {}
+    required_sizes = []
+    for house_num, pts in houses.items():
+        bbox_w = polygon_bbox(pts)[2] - polygon_bbox(pts)[0]
+        bbox_h = polygon_bbox(pts)[3] - polygon_bbox(pts)[1]
+        safe_width = min(bbox_w, bbox_h) * 0.62
+        centroid = polygon_centroid(pts)
+        per_house_geometry[house_num] = (safe_width, centroid)
+
+        header, resident_labels, aspect_label = content[house_num]
+        all_lines = [header] + resident_labels + ([aspect_label] if aspect_label else [])
+        required_sizes.append(min(fit_font_size(ln, safe_width) for ln in all_lines))
+
+    block_font = min(required_sizes)
+    line_height = block_font * 1.2
+    gap_units = 0.6
+
+    # -- Pass 2: draw everything at that uniform size. --
     for house_num, pts in houses.items():
         points_str = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
         svg_lines.append(
@@ -278,40 +319,20 @@ def generate_north_indian_chart_svg(chart_data, canvas_size=900):
             f'stroke="black" stroke-width="1.5"/>'
         )
 
-        bbox_w = polygon_bbox(pts)[2] - polygon_bbox(pts)[0]
-        bbox_h = polygon_bbox(pts)[3] - polygon_bbox(pts)[1]
-        safe_width = min(bbox_w, bbox_h) * 0.62
-        centroid = polygon_centroid(pts)
-
-        header = f"House {house_num}: {house_sign[house_num]}"
-        occupants = by_house[house_num]
-        resident_labels = [f"{PLANET_ABBR.get(n, n)} {d:.1f}\u00b0" for n, d in occupants]
-
-        aspecting = aspects_by_house[house_num]
-        aspect_label = None
-        if aspecting:
-            abbrs = [a[1] for a in aspecting]
-            aspect_label = "Asp: " + ", ".join(abbrs)
-
+        safe_width, centroid = per_house_geometry[house_num]
+        header, resident_labels, aspect_label = content[house_num]
         black_lines = resident_labels + ([aspect_label] if aspect_label else [])
-        all_lines_for_sizing = [header] + black_lines
 
-        block_font = min(fit_font_size(ln, safe_width) for ln in all_lines_for_sizing)
-        line_height = block_font * 1.2
-        gap_units = 0.6  # extra vertical space (in line-heights) between the
-                          # green header and the black resident/aspect section
-
-        # Build a list of (text, style, vertical_offset_in_line_heights)
         items = [(header, "header", 0.0)]
         cursor = 1.0 + (gap_units if black_lines else 0.0)
-        for i, ln in enumerate(resident_labels):
+        for ln in resident_labels:
             items.append((ln, "resident", cursor))
             cursor += 1.0
         if aspect_label:
             items.append((aspect_label, "aspect", cursor))
             cursor += 1.0
 
-        total_span = cursor - 1.0  # total vertical space used, in line-heights
+        total_span = cursor - 1.0
         center_offset = total_span / 2.0
         base_y = centroid[1] - center_offset * line_height
 
@@ -392,18 +413,7 @@ def draw_chart_on_pdf_canvas(c, chart_data, x0, y0, side):
     Mirrors generate_north_indian_chart_svg's logic exactly, just with
     reportlab drawing calls instead of building an SVG string."""
     houses = build_house_polygons(x0, y0, side)
-
-    by_house = {h: [] for h in range(1, 13)}
-    by_house[1].append(("Ascendant", chart_data["ascendant"]["degree"]))
-    graha_placements = []
-    for p in chart_data["planets"]:
-        by_house[p["house"]].append((p["name"], p["degree"]))
-        graha_placements.append((p["name"], p["house"], p["degree"]))
-    aspects_by_house = compute_vedic_aspects(graha_placements)
-
-    asc_sign = chart_data["ascendant"]["sign"]
-    asc_index = SIGNS.index(asc_sign)
-    house_sign = {h: SIGNS[(asc_index + h - 1) % 12] for h in range(1, 13)}
+    content = _house_text_content(chart_data)
 
     def to_pdf_point(pt):
         # This function draws in a top-down coordinate space (y increases
@@ -411,6 +421,37 @@ def draw_chart_on_pdf_canvas(c, chart_data, x0, y0, side):
         # converts a point into reportlab's actual bottom-up page space.
         x, y = pt
         return x, (y0 * 2 + side) - y  # mirror around the shape's own vertical center
+
+    def fits(text, size, font):
+        return c.stringWidth(text, font, size) <= safe_width
+
+    def best_size(text, font, safe_width):
+        for size in (28, 24, 20, 18, 16, 14, 13, 12, 11, 10, 9, 8, 7, 6):
+            if c.stringWidth(text, font, size) <= safe_width:
+                return size
+        return 6
+
+    # -- Pass 1: find the single font size that fits every house, so all
+    # houses render at the same size instead of each fitting independently. --
+    per_house_geometry = {}
+    required_sizes = []
+    for house_num, pts in houses.items():
+        bbox_w = polygon_bbox(pts)[2] - polygon_bbox(pts)[0]
+        bbox_h = polygon_bbox(pts)[3] - polygon_bbox(pts)[1]
+        safe_width = min(bbox_w, bbox_h) * 0.62
+        centroid = to_pdf_point(polygon_centroid(pts))
+        per_house_geometry[house_num] = (safe_width, centroid)
+
+        header, resident_labels, aspect_label = content[house_num]
+        required_sizes.append(min(
+            [best_size(header, "Helvetica", safe_width)] +
+            [best_size(ln, "Helvetica-Bold", safe_width) for ln in resident_labels] +
+            ([best_size(aspect_label, "Helvetica", safe_width)] if aspect_label else [])
+        ))
+
+    block_font = min(required_sizes)
+    line_height = block_font * 1.3
+    gap_units = 0.6
 
     c.setLineWidth(1.2)
     for house_num, pts in houses.items():
@@ -422,32 +463,10 @@ def draw_chart_on_pdf_canvas(c, chart_data, x0, y0, side):
         path.close()
         c.drawPath(path, stroke=1, fill=0)
 
-        bbox_w = polygon_bbox(pts)[2] - polygon_bbox(pts)[0]
-        bbox_h = polygon_bbox(pts)[3] - polygon_bbox(pts)[1]
-        safe_width = min(bbox_w, bbox_h) * 0.62
-        centroid = to_pdf_point(polygon_centroid(pts))
-
-        header = f"House {house_num}: {house_sign[house_num]}"
-        occupants = by_house[house_num]
-        resident_labels = [f"{PLANET_ABBR.get(n, n)} {d:.1f}\u00b0" for n, d in occupants]
-        aspecting = aspects_by_house[house_num]
-        aspect_label = ("Asp: " + ", ".join(a[1] for a in aspecting)) if aspecting else None
+        safe_width, centroid = per_house_geometry[house_num]
+        header, resident_labels, aspect_label = content[house_num]
         black_lines = resident_labels + ([aspect_label] if aspect_label else [])
 
-        def fits(text, size, font):
-            return c.stringWidth(text, font, size) <= safe_width
-
-        def best_size(text, font):
-            for size in (20, 18, 16, 14, 13, 12, 11, 10, 9, 8, 7, 6):
-                if fits(text, size, font):
-                    return size
-            return 6
-
-        block_font = min([best_size(header, "Helvetica")] +
-                          [best_size(ln, "Helvetica-Bold") for ln in resident_labels] +
-                          ([best_size(aspect_label, "Helvetica")] if aspect_label else []))
-        line_height = block_font * 1.3
-        gap_units = 0.6
         cursor = 1.0 + (gap_units if black_lines else 0.0)
         n_black = len(black_lines)
         total_span = (cursor - 1.0) + n_black
@@ -520,9 +539,31 @@ def generate_full_chart_pdf(chart_data):
     c.drawCentredString(page_w / 2, page_h - 0.9 * inch,
                          f"{chart_data['birth']['local_datetime']} ({chart_data['birth']['timezone']}) "
                          f"-- {chart_data['birth']['resolved_address']}")
-    chart_side = 6.5 * inch
+
+    # -- Key/legend, explaining the three text styles used in the chart --
+    legend_x = 0.75 * inch
+    legend_y = page_h - 1.15 * inch
+    line_gap = 0.2 * inch
+
+    c.setFont("Helvetica-Bold", 9)
+    c.setFillColorRGB(0.18, 0.49, 0.31)
+    c.drawString(legend_x, legend_y, "Green")
+    c.setFillColorRGB(0, 0, 0)
+    c.setFont("Helvetica", 9)
+    c.drawString(legend_x + 0.55 * inch, legend_y, "= the house number and its sign")
+
+    c.setFont("Helvetica-Bold", 9)
+    c.drawString(legend_x, legend_y - line_gap, "Bold black")
+    c.setFont("Helvetica", 9)
+    c.drawString(legend_x + 0.85 * inch, legend_y - line_gap, "= a planet placed in that house")
+
+    c.setFont("Helvetica", 9)
+    c.drawString(legend_x, legend_y - 2 * line_gap, "Plain black")
+    c.drawString(legend_x + 0.85 * inch, legend_y - 2 * line_gap, "= a planet aspecting that house")
+
+    chart_side = 7.0 * inch
     chart_x0 = (page_w - chart_side) / 2
-    chart_y0 = 1.1 * inch
+    chart_y0 = 0.95 * inch
     draw_chart_on_pdf_canvas(c, chart_data, chart_x0, chart_y0, chart_side)
 
     # -- Page 3: Placements table --
@@ -560,25 +601,18 @@ def generate_full_chart_pdf(chart_data):
     c.setFont("Helvetica-Bold", 16)
     c.drawString(0.75 * inch, page_h - 0.9 * inch, "Houses")
     y = page_h - 1.3 * inch
-    col_x2 = [0.75 * inch, 1.9 * inch, 3.0 * inch, 5.0 * inch]
-    col_widths2 = [1.15 * inch, 1.1 * inch, 2.0 * inch, (page_w - 0.75 * inch) - 5.0 * inch]
-    headers2 = ["House", "Sign", "Body", "Aspects"]
-    c.setFont("Helvetica-Bold", 9)
-    for cx, h in zip(col_x2, headers2):
-        c.drawString(cx, y, h)
-    y -= 0.22 * inch
-    row_font_size = 8
-    row_line_height = 0.16 * inch
-    c.setFont("Helvetica", row_font_size)
+    col_x2 = [0.75 * inch, 2.05 * inch, 3.05 * inch, 5.0 * inch]
+    col_widths2 = [1.3 * inch, 1.0 * inch, 1.95 * inch, (page_w - 0.75 * inch) - 5.0 * inch]
+    headers2 = ["House", "Sign", "Planets in this House", "Planets that aspect this House"]
 
-    def wrap_cell_text(text, max_width, font_size):
+    def wrap_cell_text(text, max_width, font_size, font="Helvetica"):
         """Word-wraps text to fit max_width, returns a list of lines."""
         words = text.split(" ")
         lines = []
         line = ""
         for word in words:
             trial = (line + " " + word).strip()
-            if c.stringWidth(trial, "Helvetica", font_size) > max_width and line:
+            if c.stringWidth(trial, font, font_size) > max_width and line:
                 lines.append(line)
                 line = word
             else:
@@ -587,9 +621,20 @@ def generate_full_chart_pdf(chart_data):
             lines.append(line)
         return lines or [""]
 
+    c.setFont("Helvetica-Bold", 9)
+    for cx, cw, h in zip(col_x2, col_widths2, headers2):
+        for i, ln in enumerate(wrap_cell_text(h, cw - 0.05 * inch, 9, "Helvetica-Bold")):
+            c.drawString(cx, y - i * 0.14 * inch, ln)
+    y -= 0.4 * inch
+    row_font_size = 8
+    row_line_height = 0.16 * inch
+    c.setFont("Helvetica", row_font_size)
+
     for house_data in chart_data["houses"]:
         bodies_text = ", ".join(f"{b['abbr']} {b['degree']:.1f}\u00b0" for b in house_data["bodies"]) or "None"
-        aspects_text = ", ".join(f"{a['abbr']} {a['degree']:.1f}\u00b0" for a in house_data["aspects"]) or "None"
+        aspects_text = ", ".join(
+            f"{a['display_name']} ({a['abbr']}) {a['degree']:.1f}\u00b0" for a in house_data["aspects"]
+        ) or "None"
 
         body_lines = wrap_cell_text(bodies_text, col_widths2[2] - 0.1 * inch, row_font_size)
         aspect_lines = wrap_cell_text(aspects_text, col_widths2[3] - 0.1 * inch, row_font_size)
