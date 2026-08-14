@@ -13,9 +13,11 @@ website's JavaScript front-end can request a chart instead of someone
 running the script by hand in Terminal.
 
 Endpoints:
-  GET  /api/chart   -- returns chart data as JSON (positions, houses, etc.)
+  GET  /api/chart     -- returns chart data as JSON (positions, houses, etc.)
   GET  /api/chart-svg -- returns the North Indian chart as an SVG image
-  GET  /health      -- simple check that the server is running
+  GET  /api/chart-pdf -- returns a full downloadable PDF report (intro
+                          explainer, the chart, Placements table, Houses table)
+  GET  /health        -- simple check that the server is running
 
 This is a DEVELOPMENT server (Flask's built-in one). It is not meant to
 be exposed to the public internet as-is -- see the bottom of this file
@@ -51,10 +53,35 @@ PLANET_ABBR = {
     "Jupiter": "Ju", "Saturn": "Sa", "Uranus": "Ur", "Neptune": "Ne",
     "Pluto": "Pl", "Rahu": "Ra", "Ketu": "Ke", "Ascendant": "As",
 }
-DISPLAY_NAME = {"Rahu": "North Node (Rahu)", "Ketu": "South Node (Ketu)"}
+DISPLAY_NAME = {"Rahu": "North Node", "Ketu": "South Node"}
 
-INNER_VERTEX_INDEX = {1: 2, 2: 2, 3: 1, 4: 2, 5: 2, 6: 1,
-                       7: 2, 8: 2, 9: 1, 10: 2, 11: 2, 12: 1}
+# Classical Parashari graha drishti (whole-sign aspects). Every graha
+# aspects the 7th house from itself (offset 6, 0-indexed) -- universal.
+# These bodies also cast additional "special" aspects:
+SPECIAL_ASPECT_OFFSETS = {
+    "Mars": [3, 7],       # 4th and 8th from itself
+    "Jupiter": [4, 8],    # 5th and 9th
+    "Saturn": [2, 9],     # 3rd and 10th
+    "Rahu": [4, 8],       # 5th and 9th (same convention as Jupiter)
+    "Ketu": [4, 8],       # 5th and 9th (same convention as Jupiter)
+}
+
+
+def compute_vedic_aspects(planet_placements):
+    """planet_placements: list of (name, house_number, degree) for every
+    graha (NOT the Ascendant -- it doesn't cast aspects, it's just the
+    House 1 reference point). Returns {house_number: [(name, abbr, degree), ...]}
+    for every house that has at least one incoming aspect."""
+    aspects_by_house = {h: [] for h in range(1, 13)}
+    for name, house, degree in planet_placements:
+        offsets = [6] + SPECIAL_ASPECT_OFFSETS.get(name, [])
+        house_index = house - 1
+        for off in offsets:
+            target_house = ((house_index + off) % 12) + 1
+            aspects_by_house[target_house].append(
+                (name, PLANET_ABBR.get(name, name), degree)
+            )
+    return aspects_by_house
 
 
 # ----------------------------------------------------------------------
@@ -125,6 +152,30 @@ def compute_natal_chart(year, month, day, hour, minute, city):
             "retrograde": retro,
         })
 
+    graha_placements = [(p["name"], p["house"], p["degree"]) for p in planets]
+    aspects_by_house = compute_vedic_aspects(graha_placements)
+
+    by_house_bodies = {h: [] for h in range(1, 13)}
+    by_house_bodies[1].append({"name": "Ascendant", "display_name": "Ascendant",
+                                 "abbr": "As", "degree": round(asc_deg, 2)})
+    for p in planets:
+        by_house_bodies[p["house"]].append({
+            "name": p["name"], "display_name": p["display_name"],
+            "abbr": p["abbr"], "degree": p["degree"],
+        })
+
+    houses = []
+    for h in range(1, 13):
+        houses.append({
+            "house": h,
+            "sign": SIGNS[(asc_sign_index + h - 1) % 12],
+            "bodies": by_house_bodies[h],
+            "aspects": [
+                {"name": name, "abbr": abbr, "degree": round(degree, 2)}
+                for name, abbr, degree in aspects_by_house[h]
+            ],
+        })
+
     return {
         "birth": {
             "local_datetime": birth_dt_local.strftime("%Y-%m-%d %H:%M"),
@@ -142,6 +193,7 @@ def compute_natal_chart(year, month, day, hour, minute, city):
             "house": 1,
         },
         "planets": planets,
+        "houses": houses,
         "ayanamsa": "Lahiri (sidereal)",
         "house_system": "Whole Sign",
     }
@@ -185,7 +237,7 @@ def estimate_text_width(text, font_size, avg_char_ratio=0.56):
     return len(text) * font_size * avg_char_ratio
 
 
-def fit_font_size(text, max_width, candidates=(15, 14, 13, 12, 11, 10, 9, 8, 7)):
+def fit_font_size(text, max_width, candidates=(36, 32, 28, 26, 24, 22, 20, 18, 16, 14, 12, 10, 8)):
     for size in candidates:
         if estimate_text_width(text, size) <= max_width:
             return size
@@ -201,8 +253,12 @@ def generate_north_indian_chart_svg(chart_data, canvas_size=900):
 
     by_house = {h: [] for h in range(1, 13)}
     by_house[1].append(("Ascendant", chart_data["ascendant"]["degree"]))
+    graha_placements = []  # for aspect calc -- excludes Ascendant, it doesn't cast aspects
     for p in chart_data["planets"]:
         by_house[p["house"]].append((p["name"], p["degree"]))
+        graha_placements.append((p["name"], p["house"], p["degree"]))
+
+    aspects_by_house = compute_vedic_aspects(graha_placements)
 
     asc_index = SIGNS.index(asc_sign)
     house_sign = {h: SIGNS[(asc_index + h - 1) % 12] for h in range(1, 13)}
@@ -212,6 +268,8 @@ def generate_north_indian_chart_svg(chart_data, canvas_size=900):
         f'height="{canvas_size}" viewBox="0 0 {canvas_size} {canvas_size}">',
         f'<rect x="0" y="0" width="{canvas_size}" height="{canvas_size}" fill="white"/>',
     ]
+
+    HOUSE_HEADER_GREEN = "#2E7D4F"
 
     for house_num, pts in houses.items():
         points_str = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
@@ -225,26 +283,336 @@ def generate_north_indian_chart_svg(chart_data, canvas_size=900):
         safe_width = min(bbox_w, bbox_h) * 0.62
         centroid = polygon_centroid(pts)
 
-        sign_name = house_sign[house_num]
+        header = f"House {house_num}: {house_sign[house_num]}"
         occupants = by_house[house_num]
-        planet_labels = [f"{PLANET_ABBR.get(n, n)} {d:.1f}\u00b0" for n, d in occupants]
-        all_lines = [sign_name] + planet_labels
+        resident_labels = [f"{PLANET_ABBR.get(n, n)} {d:.1f}\u00b0" for n, d in occupants]
 
-        block_font = min(fit_font_size(ln, safe_width) for ln in all_lines)
+        aspecting = aspects_by_house[house_num]
+        aspect_label = None
+        if aspecting:
+            abbrs = [a[1] for a in aspecting]
+            aspect_label = "Asp: " + ", ".join(abbrs)
+
+        black_lines = resident_labels + ([aspect_label] if aspect_label else [])
+        all_lines_for_sizing = [header] + black_lines
+
+        block_font = min(fit_font_size(ln, safe_width) for ln in all_lines_for_sizing)
         line_height = block_font * 1.2
-        start_y = centroid[1] - (len(all_lines) - 1) * line_height / 2
-        for i, ln in enumerate(all_lines):
-            is_sign_line = (i == 0)
-            style_attr = 'fill="#555"' if is_sign_line else 'font-weight="bold" fill="black"'
+        gap_units = 0.6  # extra vertical space (in line-heights) between the
+                          # green header and the black resident/aspect section
+
+        # Build a list of (text, style, vertical_offset_in_line_heights)
+        items = [(header, "header", 0.0)]
+        cursor = 1.0 + (gap_units if black_lines else 0.0)
+        for i, ln in enumerate(resident_labels):
+            items.append((ln, "resident", cursor))
+            cursor += 1.0
+        if aspect_label:
+            items.append((aspect_label, "aspect", cursor))
+            cursor += 1.0
+
+        total_span = cursor - 1.0  # total vertical space used, in line-heights
+        center_offset = total_span / 2.0
+        base_y = centroid[1] - center_offset * line_height
+
+        for text, kind, offset in items:
+            if kind == "header":
+                style_attr = f'fill="{HOUSE_HEADER_GREEN}"'
+            elif kind == "resident":
+                style_attr = 'font-weight="bold" fill="black"'
+            else:  # aspect
+                style_attr = 'fill="black"'
             svg_lines.append(
-                f'<text x="{centroid[0]:.1f}" y="{start_y + i * line_height:.1f}" '
+                f'<text x="{centroid[0]:.1f}" y="{base_y + offset * line_height:.1f}" '
                 f'font-size="{block_font}" text-anchor="middle" '
                 f'{style_attr} '
-                f'font-family="sans-serif">{ln}</text>'
+                f'font-family="sans-serif">{text}</text>'
             )
 
     svg_lines.append('</svg>')
     return "\n".join(svg_lines)
+
+
+# ----------------------------------------------------------------------
+# FULL PDF REPORT -- intro/explanation page, the chart itself, and both
+# tables, all in one downloadable document.
+# ----------------------------------------------------------------------
+INTRO_SECTIONS = [
+    ("What is this chart?",
+     "This is your natal (birth) chart, calculated using the sidereal "
+     "zodiac with the Lahiri ayanamsa -- the system used in traditional "
+     "Vedic (Jyotish) astrology. It's a snapshot of exactly where the Sun, "
+     "Moon, and every planet were positioned at the moment and place you "
+     "were born."),
+    ("The Ascendant (marked 'As')",
+     "Your Ascendant is the zodiac sign that was rising on the eastern "
+     "horizon at your exact birth time. It always defines House 1 -- "
+     "everything else in the chart is read relative to it."),
+    ("Houses",
+     "The chart is divided into 12 houses, each representing a different "
+     "area of life (self, money, communication, home, and so on). This "
+     "chart uses the Whole Sign house system: House 1 is always your "
+     "Ascendant's entire sign, and each house that follows is simply the "
+     "next sign in zodiac order."),
+    ("Reading the North Indian chart layout",
+     "Unlike a circular chart, a North Indian style chart keeps the "
+     "houses in fixed positions -- House 1 is always the top diamond, and "
+     "the rest follow counter-clockwise around the square. The sign name "
+     "shown in green inside each section tells you which zodiac sign "
+     "occupies that house for you specifically."),
+    ("Planets in bold black",
+     "Any planet listed in bold black inside a house is physically placed "
+     "in that house for your chart -- this is the most direct, primary "
+     "influence in that area of life."),
+    ("Aspects, in plain black",
+     "Planets don't only affect the house they sit in -- they also cast "
+     "influence ('aspects', or drishti) onto other houses. Every planet "
+     "aspects the house directly opposite its own (the 7th house from "
+     "itself). Mars, Jupiter, Saturn, and the lunar nodes (Rahu and Ketu) "
+     "each cast two additional special aspects. These are listed in plain "
+     "(non-bold) black text, prefixed 'Asp:', in whichever house receives "
+     "them."),
+    ("Rahu and Ketu (the lunar nodes)",
+     "Rahu (the North Node) and Ketu (the South Node) aren't physical "
+     "planets -- they're the two points where the Moon's orbital path "
+     "crosses the Sun's. They're treated as full participants in Vedic "
+     "astrology, always positioned exactly opposite one another."),
+    ("Retrograde",
+     "A planet marked RETROGRADE appeared to be moving backward through "
+     "the zodiac from Earth's point of view at the moment of your birth "
+     "-- a real, if temporary, optical effect of orbital mechanics, "
+     "traditionally considered to change how that planet's energy "
+     "expresses itself."),
+]
+
+
+def draw_chart_on_pdf_canvas(c, chart_data, x0, y0, side):
+    """Draws the North Indian chart directly onto a reportlab canvas at
+    the given position/size (reportlab's own bottom-up coordinate system).
+    Mirrors generate_north_indian_chart_svg's logic exactly, just with
+    reportlab drawing calls instead of building an SVG string."""
+    houses = build_house_polygons(x0, y0, side)
+
+    by_house = {h: [] for h in range(1, 13)}
+    by_house[1].append(("Ascendant", chart_data["ascendant"]["degree"]))
+    graha_placements = []
+    for p in chart_data["planets"]:
+        by_house[p["house"]].append((p["name"], p["degree"]))
+        graha_placements.append((p["name"], p["house"], p["degree"]))
+    aspects_by_house = compute_vedic_aspects(graha_placements)
+
+    asc_sign = chart_data["ascendant"]["sign"]
+    asc_index = SIGNS.index(asc_sign)
+    house_sign = {h: SIGNS[(asc_index + h - 1) % 12] for h in range(1, 13)}
+
+    def to_pdf_point(pt):
+        # This function draws in a top-down coordinate space (y increases
+        # downward, matching build_house_polygons' convention) -- this
+        # converts a point into reportlab's actual bottom-up page space.
+        x, y = pt
+        return x, (y0 * 2 + side) - y  # mirror around the shape's own vertical center
+
+    c.setLineWidth(1.2)
+    for house_num, pts in houses.items():
+        pdf_pts = [to_pdf_point(p) for p in pts]
+        path = c.beginPath()
+        path.moveTo(*pdf_pts[0])
+        for p in pdf_pts[1:]:
+            path.lineTo(*p)
+        path.close()
+        c.drawPath(path, stroke=1, fill=0)
+
+        bbox_w = polygon_bbox(pts)[2] - polygon_bbox(pts)[0]
+        bbox_h = polygon_bbox(pts)[3] - polygon_bbox(pts)[1]
+        safe_width = min(bbox_w, bbox_h) * 0.62
+        centroid = to_pdf_point(polygon_centroid(pts))
+
+        header = f"House {house_num}: {house_sign[house_num]}"
+        occupants = by_house[house_num]
+        resident_labels = [f"{PLANET_ABBR.get(n, n)} {d:.1f}\u00b0" for n, d in occupants]
+        aspecting = aspects_by_house[house_num]
+        aspect_label = ("Asp: " + ", ".join(a[1] for a in aspecting)) if aspecting else None
+        black_lines = resident_labels + ([aspect_label] if aspect_label else [])
+
+        def fits(text, size, font):
+            return c.stringWidth(text, font, size) <= safe_width
+
+        def best_size(text, font):
+            for size in (20, 18, 16, 14, 13, 12, 11, 10, 9, 8, 7, 6):
+                if fits(text, size, font):
+                    return size
+            return 6
+
+        block_font = min([best_size(header, "Helvetica")] +
+                          [best_size(ln, "Helvetica-Bold") for ln in resident_labels] +
+                          ([best_size(aspect_label, "Helvetica")] if aspect_label else []))
+        line_height = block_font * 1.3
+        gap_units = 0.6
+        cursor = 1.0 + (gap_units if black_lines else 0.0)
+        n_black = len(black_lines)
+        total_span = (cursor - 1.0) + n_black
+        center_offset = total_span / 2.0
+        base_y = centroid[1] + center_offset * line_height  # reportlab y grows upward
+
+        c.setFont("Helvetica", block_font)
+        c.setFillColorRGB(0.18, 0.49, 0.31)  # green
+        c.drawCentredString(centroid[0], base_y, header)
+        c.setFillColorRGB(0, 0, 0)
+
+        y_cursor = base_y - gap_units * line_height
+        for ln in resident_labels:
+            y_cursor -= line_height
+            c.setFont("Helvetica-Bold", block_font)
+            c.drawCentredString(centroid[0], y_cursor, ln)
+        if aspect_label:
+            y_cursor -= line_height
+            c.setFont("Helvetica", block_font)
+            c.drawCentredString(centroid[0], y_cursor, aspect_label)
+
+
+def generate_full_chart_pdf(chart_data):
+    from reportlab.pdfgen import canvas as pdfcanvas
+    from reportlab.lib.units import inch
+    from reportlab.lib.pagesizes import letter
+
+    buf = io.BytesIO()
+    page_w, page_h = letter
+    c = pdfcanvas.Canvas(buf, pagesize=letter)
+
+    # -- Page 1: intro / how to read this chart --
+    c.setFont("Helvetica-Bold", 20)
+    c.drawString(0.75 * inch, page_h - 0.9 * inch, "Read This Before You Try to Interpret")
+    c.setFont("Helvetica", 10)
+    c.drawString(0.75 * inch, page_h - 1.15 * inch,
+                 f"Your Vedic Birth Chart -- {chart_data['birth']['resolved_address']}")
+
+    y = page_h - 1.6 * inch
+    for heading, body in INTRO_SECTIONS:
+        c.setFont("Helvetica-Bold", 12)
+        c.drawString(0.75 * inch, y, heading)
+        y -= 0.22 * inch
+        c.setFont("Helvetica", 10)
+        # simple word-wrap to fit the page width
+        words = body.split()
+        line = ""
+        max_width = page_w - 1.5 * inch
+        for word in words:
+            trial = (line + " " + word).strip()
+            if c.stringWidth(trial, "Helvetica", 10) > max_width:
+                c.drawString(0.75 * inch, y, line)
+                y -= 0.18 * inch
+                line = word
+            else:
+                line = trial
+        if line:
+            c.drawString(0.75 * inch, y, line)
+            y -= 0.18 * inch
+        y -= 0.18 * inch
+        if y < 1 * inch:
+            c.showPage()
+            y = page_h - 0.9 * inch
+
+    # -- Page 2: the chart itself --
+    c.showPage()
+    c.setFont("Helvetica-Bold", 16)
+    c.drawCentredString(page_w / 2, page_h - 0.7 * inch, "Your Vedic Birth Chart")
+    c.setFont("Helvetica", 9)
+    c.drawCentredString(page_w / 2, page_h - 0.9 * inch,
+                         f"{chart_data['birth']['local_datetime']} ({chart_data['birth']['timezone']}) "
+                         f"-- {chart_data['birth']['resolved_address']}")
+    chart_side = 6.5 * inch
+    chart_x0 = (page_w - chart_side) / 2
+    chart_y0 = 1.1 * inch
+    draw_chart_on_pdf_canvas(c, chart_data, chart_x0, chart_y0, chart_side)
+
+    # -- Page 3: Placements table --
+    c.showPage()
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(0.75 * inch, page_h - 0.9 * inch, "Placements")
+    y = page_h - 1.3 * inch
+    col_x = [0.75 * inch, 3.5 * inch, 4.8 * inch, 5.8 * inch]
+    headers = ["Body", "Sign", "Degree", "House"]
+    c.setFont("Helvetica-Bold", 9)
+    for cx, h in zip(col_x, headers):
+        c.drawString(cx, y, h)
+    y -= 0.22 * inch
+    c.setFont("Helvetica", 9)
+
+    rows = [("Ascendant", "As", chart_data["ascendant"]["sign"],
+              chart_data["ascendant"]["degree"], 1, False)]
+    for p in chart_data["planets"]:
+        rows.append((p["display_name"], p["abbr"], p["sign"], p["degree"], p["house"], p["retrograde"]))
+
+    for name, abbr, sign, degree, house, retro in rows:
+        label = f"{name} ({abbr})" + (" RETROGRADE" if retro else "")
+        c.drawString(col_x[0], y, label)
+        c.drawString(col_x[1], y, sign)
+        c.drawString(col_x[2], y, f"{degree:.1f}\u00b0")
+        c.drawString(col_x[3], y, f"House {house}")
+        y -= 0.2 * inch
+        if y < 0.75 * inch:
+            c.showPage()
+            y = page_h - 0.9 * inch
+            c.setFont("Helvetica", 9)
+
+    # -- Page 4: Houses table --
+    c.showPage()
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(0.75 * inch, page_h - 0.9 * inch, "Houses")
+    y = page_h - 1.3 * inch
+    col_x2 = [0.75 * inch, 1.9 * inch, 3.0 * inch, 5.0 * inch]
+    col_widths2 = [1.15 * inch, 1.1 * inch, 2.0 * inch, (page_w - 0.75 * inch) - 5.0 * inch]
+    headers2 = ["House", "Sign", "Body", "Aspects"]
+    c.setFont("Helvetica-Bold", 9)
+    for cx, h in zip(col_x2, headers2):
+        c.drawString(cx, y, h)
+    y -= 0.22 * inch
+    row_font_size = 8
+    row_line_height = 0.16 * inch
+    c.setFont("Helvetica", row_font_size)
+
+    def wrap_cell_text(text, max_width, font_size):
+        """Word-wraps text to fit max_width, returns a list of lines."""
+        words = text.split(" ")
+        lines = []
+        line = ""
+        for word in words:
+            trial = (line + " " + word).strip()
+            if c.stringWidth(trial, "Helvetica", font_size) > max_width and line:
+                lines.append(line)
+                line = word
+            else:
+                line = trial
+        if line:
+            lines.append(line)
+        return lines or [""]
+
+    for house_data in chart_data["houses"]:
+        bodies_text = ", ".join(f"{b['abbr']} {b['degree']:.1f}\u00b0" for b in house_data["bodies"]) or "None"
+        aspects_text = ", ".join(f"{a['abbr']} {a['degree']:.1f}\u00b0" for a in house_data["aspects"]) or "None"
+
+        body_lines = wrap_cell_text(bodies_text, col_widths2[2] - 0.1 * inch, row_font_size)
+        aspect_lines = wrap_cell_text(aspects_text, col_widths2[3] - 0.1 * inch, row_font_size)
+        n_lines = max(len(body_lines), len(aspect_lines), 1)
+        row_height = n_lines * row_line_height
+
+        if y - row_height < 0.75 * inch:
+            c.showPage()
+            y = page_h - 0.9 * inch
+            c.setFont("Helvetica", row_font_size)
+
+        c.drawString(col_x2[0], y, f"House {house_data['house']}")
+        c.drawString(col_x2[1], y, house_data["sign"])
+        for i, ln in enumerate(body_lines):
+            c.drawString(col_x2[2], y - i * row_line_height, ln)
+        for i, ln in enumerate(aspect_lines):
+            c.drawString(col_x2[3], y - i * row_line_height, ln)
+
+        y -= row_height + 0.1 * inch
+
+    c.save()
+    buf.seek(0)
+    return buf
 
 
 # ----------------------------------------------------------------------
@@ -304,6 +672,23 @@ def api_chart_svg():
         chart_data = compute_natal_chart(year, month, day, hour, minute, city)
         svg = generate_north_indian_chart_svg(chart_data)
         return Response(svg, mimetype="image/svg+xml")
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": f"Unexpected error: {e}"}), 500
+
+
+@app.route("/api/chart-pdf")
+def api_chart_pdf():
+    try:
+        year, month, day, hour, minute, city = parse_birth_args(request.args)
+        chart_data = compute_natal_chart(year, month, day, hour, minute, city)
+        pdf_buffer = generate_full_chart_pdf(chart_data)
+        return Response(
+            pdf_buffer.read(),
+            mimetype="application/pdf",
+            headers={"Content-Disposition": "attachment; filename=vedic_birth_chart.pdf"},
+        )
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
