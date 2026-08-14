@@ -17,6 +17,10 @@ Endpoints:
   GET  /api/chart-svg -- returns the North Indian chart as an SVG image
   GET  /api/chart-pdf -- returns a full downloadable PDF report (intro
                           explainer, the chart, Placements table, Houses table)
+  GET  /api/chart-now     -- like /api/chart, but for the current moment at
+                              a given lat/lon (no birth info -- takes ?lat=&lon=)
+  GET  /api/chart-now-svg -- like /api/chart-svg, but for the current moment
+  GET  /api/chart-now-pdf -- like /api/chart-pdf, but for the current moment
   GET  /health        -- simple check that the server is running
 
 This is a DEVELOPMENT server (Flask's built-in one). It is not meant to
@@ -112,24 +116,24 @@ def whole_sign_house(planet_sign_index, ascendant_sign_index):
 # constants, since a web server handles many different requests, not
 # just one hardcoded birth
 # ----------------------------------------------------------------------
-def compute_natal_chart(year, month, day, hour, minute, city):
-    geolocator = Nominatim(user_agent="natal_chart_api")
-    location = geolocator.geocode(city)
-    if location is None:
-        raise ValueError(f"Could not find coordinates for '{city}'")
-    lat, lon = location.latitude, location.longitude
-
+def compute_chart_from_coords(year, month, day, hour, minute, lat, lon, location_label):
+    """The actual math, given a moment (local date/time, resolved via
+    timezone lookup from the coordinates) and a location already reduced
+    to lat/lon. Used both by the city-based birth chart flow (after
+    geocoding) and the "chart for this moment" flow (which already has
+    coordinates from the browser's own geolocation, so it skips geocoding
+    entirely)."""
     tf = TimezoneFinder()
     tz_name = tf.timezone_at(lat=lat, lng=lon)
     if tz_name is None:
         raise ValueError(f"Could not determine a timezone for ({lat}, {lon})")
 
-    birth_dt_local = dt.datetime(year, month, day, hour, minute, tzinfo=ZoneInfo(tz_name))
-    birth_dt_utc = birth_dt_local.astimezone(dt.timezone.utc)
-    utc_offset = birth_dt_local.utcoffset().total_seconds() / 3600.0
+    local_dt = dt.datetime(year, month, day, hour, minute, tzinfo=ZoneInfo(tz_name))
+    utc_dt = local_dt.astimezone(dt.timezone.utc)
+    utc_offset = local_dt.utcoffset().total_seconds() / 3600.0
 
-    jd = swe.julday(birth_dt_utc.year, birth_dt_utc.month, birth_dt_utc.day,
-                     birth_dt_utc.hour + birth_dt_utc.minute / 60.0)
+    jd = swe.julday(utc_dt.year, utc_dt.month, utc_dt.day,
+                     utc_dt.hour + utc_dt.minute / 60.0)
 
     cusps, ascmc = swe.houses_ex(jd, lat, lon, b'W', FLAG)
     asc_lon = ascmc[0] % 360.0
@@ -179,12 +183,12 @@ def compute_natal_chart(year, month, day, hour, minute, city):
 
     return {
         "birth": {
-            "local_datetime": birth_dt_local.strftime("%Y-%m-%d %H:%M"),
-            "utc_datetime": birth_dt_utc.strftime("%Y-%m-%d %H:%M"),
+            "local_datetime": local_dt.strftime("%Y-%m-%d %H:%M"),
+            "utc_datetime": utc_dt.strftime("%Y-%m-%d %H:%M"),
             "timezone": tz_name,
             "utc_offset_hours": round(utc_offset, 2),
-            "city_input": city,
-            "resolved_address": location.address,
+            "city_input": location_label,
+            "resolved_address": location_label,
             "latitude": lat,
             "longitude": lon,
         },
@@ -200,23 +204,38 @@ def compute_natal_chart(year, month, day, hour, minute, city):
     }
 
 
+def compute_natal_chart(year, month, day, hour, minute, city):
+    geolocator = Nominatim(user_agent="natal_chart_api")
+    location = geolocator.geocode(city)
+    if location is None:
+        raise ValueError(f"Could not find coordinates for '{city}'")
+    return compute_chart_from_coords(
+        year, month, day, hour, minute,
+        location.latitude, location.longitude, location.address,
+    )
+
+
 # ----------------------------------------------------------------------
-# NORTH INDIAN CHART SVG -- identical logic to natal_chart_prototype.py
+# NORTH INDIAN CHART SVG
 # ----------------------------------------------------------------------
-def build_house_polygons(x0, y0, side):
+def build_house_polygons(x0, y0, width, height):
+    """Generalized to a rectangle (width may differ from height) rather
+    than forcing a square -- a wider rectangle gives the narrow corner
+    triangles genuinely more horizontal room for text, which a square
+    (the traditional proportions) doesn't allow."""
     A = (x0, y0)
-    B = (x0 + side, y0)
-    C = (x0 + side, y0 + side)
-    D = (x0, y0 + side)
-    T = (x0 + side / 2, y0)
-    R = (x0 + side, y0 + side / 2)
-    Bo = (x0 + side / 2, y0 + side)
-    L = (x0, y0 + side / 2)
-    O = (x0 + side / 2, y0 + side / 2)
-    X1 = (x0 + side / 4, y0 + side / 4)
-    Y1 = (x0 + 3 * side / 4, y0 + side / 4)
-    X2 = (x0 + 3 * side / 4, y0 + 3 * side / 4)
-    Y2 = (x0 + side / 4, y0 + 3 * side / 4)
+    B = (x0 + width, y0)
+    C = (x0 + width, y0 + height)
+    D = (x0, y0 + height)
+    T = (x0 + width / 2, y0)
+    R = (x0 + width, y0 + height / 2)
+    Bo = (x0 + width / 2, y0 + height)
+    L = (x0, y0 + height / 2)
+    O = (x0 + width / 2, y0 + height / 2)
+    X1 = (x0 + width / 4, y0 + height / 4)
+    Y1 = (x0 + 3 * width / 4, y0 + height / 4)
+    X2 = (x0 + 3 * width / 4, y0 + 3 * height / 4)
+    Y2 = (x0 + width / 4, y0 + 3 * height / 4)
     return {
         1: [T, X1, O, Y1], 2: [A, T, X1], 3: [A, X1, L], 4: [L, X1, O, Y2],
         5: [D, L, Y2], 6: [D, Y2, Bo], 7: [Bo, X2, O, Y2], 8: [C, Bo, X2],
@@ -238,11 +257,30 @@ def estimate_text_width(text, font_size, avg_char_ratio=0.56):
     return len(text) * font_size * avg_char_ratio
 
 
-def fit_font_size(text, max_width, candidates=(48, 44, 40, 36, 32, 28, 26, 24, 22, 20, 18, 16, 14, 12, 10, 8)):
+def fit_font_size(text, max_width, candidates=(36, 32, 28, 26, 24, 22, 20, 18, 16, 14, 12, 10, 8)):
     for size in candidates:
         if estimate_text_width(text, size) <= max_width:
             return size
     return candidates[-1]
+
+
+def wrap_line_to_width(text, max_width, font_size, avg_char_ratio=0.56):
+    """Word-wraps a comma-joined list (like an aspect list) onto as many
+    lines as needed to fit max_width at the given font size, breaking at
+    ', ' boundaries rather than mid-item. Returns a list of lines."""
+    items = text.split(", ")
+    lines = []
+    current = ""
+    for item in items:
+        trial = (current + ", " + item) if current else item
+        if estimate_text_width(trial, font_size, avg_char_ratio) <= max_width or not current:
+            current = trial
+        else:
+            lines.append(current)
+            current = item
+    if current:
+        lines.append(current)
+    return lines
 
 
 def _house_text_content(chart_data):
@@ -275,43 +313,82 @@ def _house_text_content(chart_data):
     return content
 
 
-def generate_north_indian_chart_svg(chart_data, canvas_size=1200):
-    margin = canvas_size * 0.08
-    side = canvas_size - 2 * margin
-    x0 = y0 = margin
-    houses = build_house_polygons(x0, y0, side)
+def generate_north_indian_chart_svg(chart_data, canvas_width=1600, canvas_height=1000):
+    margin_x = canvas_width * 0.05
+    margin_y = canvas_height * 0.08
+    width = canvas_width - 2 * margin_x
+    height = canvas_height - 2 * margin_y
+    x0, y0 = margin_x, margin_y
+    houses = build_house_polygons(x0, y0, width, height)
     content = _house_text_content(chart_data)
 
     svg_lines = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{canvas_size}" '
-        f'height="{canvas_size}" viewBox="0 0 {canvas_size} {canvas_size}">',
-        f'<rect x="0" y="0" width="{canvas_size}" height="{canvas_size}" fill="white"/>',
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{canvas_width}" '
+        f'height="{canvas_height}" viewBox="0 0 {canvas_width} {canvas_height}">',
+        f'<rect x="0" y="0" width="{canvas_width}" height="{canvas_height}" fill="white"/>',
     ]
 
     HOUSE_HEADER_GREEN = "#2E7D4F"
+    HEADER_FONT_RATIO = 0.62  # header renders smaller than the actual content
+    CONTENT_CANDIDATES = [56, 52, 48, 44, 40, 36, 32, 28, 26, 24, 22, 20, 18, 16, 14, 12, 10, 8]
 
-    # -- Pass 1: figure out the single font size that fits every house's
-    # own content, so every house renders at the SAME size (rather than
-    # each house independently fitting its own text, which produced
-    # visibly inconsistent sizes from house to house). --
     per_house_geometry = {}
-    required_sizes = []
     for house_num, pts in houses.items():
         bbox_w = polygon_bbox(pts)[2] - polygon_bbox(pts)[0]
         bbox_h = polygon_bbox(pts)[3] - polygon_bbox(pts)[1]
+        # min(bbox_w, bbox_h) stays the conservative width proxy (a
+        # triangle's usable width varies with vertical position -- see the
+        # note further down about why this matters for off-center lines).
         safe_width = min(bbox_w, bbox_h) * 0.62
-        centroid = polygon_centroid(pts)
-        per_house_geometry[house_num] = (safe_width, centroid)
+        safe_height = bbox_h * 0.70
+        per_house_geometry[house_num] = (safe_width, safe_height, polygon_centroid(pts))
 
-        header, resident_labels, aspect_label = content[house_num]
-        all_lines = [header] + resident_labels + ([aspect_label] if aspect_label else [])
-        required_sizes.append(min(fit_font_size(ln, safe_width) for ln in all_lines))
+    def layout_fits(content_font):
+        """Tries to lay out every house at this content font size (with
+        aspect-list wrapping applied as needed). Returns the per-house
+        layout dict if everything fits, else None."""
+        header_font = max(int(content_font * HEADER_FONT_RATIO), 8)
+        header_line_height = header_font * 1.2
+        content_line_height = content_font * 1.2
+        layout = {}
+        for house_num, pts in houses.items():
+            safe_width, safe_height, centroid = per_house_geometry[house_num]
+            header, resident_labels, aspect_label = content[house_num]
 
-    block_font = min(required_sizes)
-    line_height = block_font * 1.2
-    gap_units = 0.6
+            if estimate_text_width(header, header_font) > safe_width:
+                return None
+            if any(estimate_text_width(r, content_font) > safe_width for r in resident_labels):
+                return None
 
-    # -- Pass 2: draw everything at that uniform size. --
+            aspect_lines = wrap_line_to_width(aspect_label, safe_width, content_font) if aspect_label else []
+            if any(estimate_text_width(ln, content_font) > safe_width for ln in aspect_lines):
+                return None
+
+            black_lines = resident_labels + aspect_lines
+            gap = 0.6 * content_line_height if black_lines else 0.0
+            total_height = header_line_height + gap + len(black_lines) * content_line_height
+            if total_height > safe_height:
+                return None
+
+            layout[house_num] = (header, resident_labels, aspect_lines)
+        return layout, header_font, content_font
+
+    result = None
+    for candidate in CONTENT_CANDIDATES:
+        result = layout_fits(candidate)
+        if result is not None:
+            break
+    if result is None:
+        # extreme fallback -- should not normally happen
+        result = layout_fits(CONTENT_CANDIDATES[-1]) or (
+            {h: (content[h][0], content[h][1], [content[h][2]] if content[h][2] else [])
+             for h in range(1, 13)},
+            8, 8,
+        )
+    layout, header_font, content_font = result
+    header_line_height = header_font * 1.2
+    content_line_height = content_font * 1.2
+
     for house_num, pts in houses.items():
         points_str = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
         svg_lines.append(
@@ -319,33 +396,37 @@ def generate_north_indian_chart_svg(chart_data, canvas_size=1200):
             f'stroke="black" stroke-width="1.5"/>'
         )
 
-        safe_width, centroid = per_house_geometry[house_num]
-        header, resident_labels, aspect_label = content[house_num]
-        black_lines = resident_labels + ([aspect_label] if aspect_label else [])
+        _, _, centroid = per_house_geometry[house_num]
+        header, resident_labels, aspect_lines = layout[house_num]
+        black_lines = resident_labels + aspect_lines
 
-        items = [(header, "header", 0.0)]
-        cursor = 1.0 + (gap_units if black_lines else 0.0)
+        cursor = 0.0
+        items = [(header, "header", cursor + header_line_height * 0.8)]
+        cursor += header_line_height
+        if black_lines:
+            cursor += 0.6 * content_line_height
         for ln in resident_labels:
-            items.append((ln, "resident", cursor))
-            cursor += 1.0
-        if aspect_label:
-            items.append((aspect_label, "aspect", cursor))
-            cursor += 1.0
+            items.append((ln, "resident", cursor + content_line_height * 0.8))
+            cursor += content_line_height
+        for ln in aspect_lines:
+            items.append((ln, "aspect", cursor + content_line_height * 0.8))
+            cursor += content_line_height
 
-        total_span = cursor - 1.0
-        center_offset = total_span / 2.0
-        base_y = centroid[1] - center_offset * line_height
+        top_y = centroid[1] - cursor / 2.0
 
-        for text, kind, offset in items:
+        for text, kind, local_y in items:
             if kind == "header":
                 style_attr = f'fill="{HOUSE_HEADER_GREEN}"'
+                fsize = header_font
             elif kind == "resident":
                 style_attr = 'font-weight="bold" fill="black"'
+                fsize = content_font
             else:  # aspect
                 style_attr = 'fill="black"'
+                fsize = content_font
             svg_lines.append(
-                f'<text x="{centroid[0]:.1f}" y="{base_y + offset * line_height:.1f}" '
-                f'font-size="{block_font}" text-anchor="middle" '
+                f'<text x="{centroid[0]:.1f}" y="{top_y + local_y:.1f}" '
+                f'font-size="{fsize}" text-anchor="middle" '
                 f'{style_attr} '
                 f'font-family="sans-serif">{text}</text>'
             )
@@ -407,12 +488,12 @@ INTRO_SECTIONS = [
 ]
 
 
-def draw_chart_on_pdf_canvas(c, chart_data, x0, y0, side):
+def draw_chart_on_pdf_canvas(c, chart_data, x0, y0, width, height):
     """Draws the North Indian chart directly onto a reportlab canvas at
     the given position/size (reportlab's own bottom-up coordinate system).
     Mirrors generate_north_indian_chart_svg's logic exactly, just with
     reportlab drawing calls instead of building an SVG string."""
-    houses = build_house_polygons(x0, y0, side)
+    houses = build_house_polygons(x0, y0, width, height)
     content = _house_text_content(chart_data)
 
     def to_pdf_point(pt):
@@ -420,38 +501,81 @@ def draw_chart_on_pdf_canvas(c, chart_data, x0, y0, side):
         # downward, matching build_house_polygons' convention) -- this
         # converts a point into reportlab's actual bottom-up page space.
         x, y = pt
-        return x, (y0 * 2 + side) - y  # mirror around the shape's own vertical center
+        return x, (y0 * 2 + height) - y  # mirror around the shape's own vertical center
 
-    def fits(text, size, font):
-        return c.stringWidth(text, font, size) <= safe_width
-
-    def best_size(text, font, safe_width):
-        for size in (28, 24, 20, 18, 16, 14, 13, 12, 11, 10, 9, 8, 7, 6):
+    def best_size(text, font, safe_width, candidates=(28, 24, 20, 18, 16, 14, 13, 12, 11, 10, 9, 8, 7, 6)):
+        for size in candidates:
             if c.stringWidth(text, font, size) <= safe_width:
                 return size
-        return 6
+        return candidates[-1]
 
-    # -- Pass 1: find the single font size that fits every house, so all
-    # houses render at the same size instead of each fitting independently. --
+    def wrap_pdf(text, safe_width, font, size):
+        items = text.split(", ")
+        lines, current = [], ""
+        for item in items:
+            trial = (current + ", " + item) if current else item
+            if c.stringWidth(trial, font, size) <= safe_width or not current:
+                current = trial
+            else:
+                lines.append(current)
+                current = item
+        if current:
+            lines.append(current)
+        return lines
+
+    HEADER_FONT_RATIO = 0.62
+    CONTENT_CANDIDATES = [40, 36, 32, 28, 26, 24, 22, 20, 18, 16, 14, 13, 12, 11, 10, 9, 8, 7, 6]
+
     per_house_geometry = {}
-    required_sizes = []
     for house_num, pts in houses.items():
         bbox_w = polygon_bbox(pts)[2] - polygon_bbox(pts)[0]
         bbox_h = polygon_bbox(pts)[3] - polygon_bbox(pts)[1]
         safe_width = min(bbox_w, bbox_h) * 0.62
-        centroid = to_pdf_point(polygon_centroid(pts))
-        per_house_geometry[house_num] = (safe_width, centroid)
+        safe_height = bbox_h * 0.70
+        per_house_geometry[house_num] = (safe_width, safe_height, to_pdf_point(polygon_centroid(pts)))
 
-        header, resident_labels, aspect_label = content[house_num]
-        required_sizes.append(min(
-            [best_size(header, "Helvetica", safe_width)] +
-            [best_size(ln, "Helvetica-Bold", safe_width) for ln in resident_labels] +
-            ([best_size(aspect_label, "Helvetica", safe_width)] if aspect_label else [])
-        ))
+    def layout_fits(content_font):
+        header_font = max(int(content_font * HEADER_FONT_RATIO), 6)
+        header_line_height = header_font * 1.3
+        content_line_height = content_font * 1.3
+        layout = {}
+        for house_num, pts in houses.items():
+            safe_width, safe_height, centroid = per_house_geometry[house_num]
+            header, resident_labels, aspect_label = content[house_num]
 
-    block_font = min(required_sizes)
-    line_height = block_font * 1.3
-    gap_units = 0.6
+            if c.stringWidth(header, "Helvetica", header_font) > safe_width:
+                return None
+            if any(c.stringWidth(r, "Helvetica-Bold", content_font) > safe_width for r in resident_labels):
+                return None
+
+            aspect_lines = wrap_pdf(aspect_label, safe_width, "Helvetica", content_font) if aspect_label else []
+            if any(c.stringWidth(ln, "Helvetica", content_font) > safe_width for ln in aspect_lines):
+                return None
+
+            black_lines = resident_labels + aspect_lines
+            gap = 0.6 * content_line_height if black_lines else 0.0
+            total_height = header_line_height + gap + len(black_lines) * content_line_height
+            if total_height > safe_height:
+                return None
+
+            layout[house_num] = (header, resident_labels, aspect_lines)
+        return layout, header_font, content_font
+
+    result = None
+    for candidate in CONTENT_CANDIDATES:
+        result = layout_fits(candidate)
+        if result is not None:
+            break
+    if result is None:
+        header_font = max(int(CONTENT_CANDIDATES[-1] * HEADER_FONT_RATIO), 6)
+        layout = {}
+        for house_num in range(1, 13):
+            header, resident_labels, aspect_label = content[house_num]
+            layout[house_num] = (header, resident_labels, [aspect_label] if aspect_label else [])
+        result = (layout, header_font, CONTENT_CANDIDATES[-1])
+    layout, header_font, content_font = result
+    header_line_height = header_font * 1.3
+    content_line_height = content_font * 1.3
 
     c.setLineWidth(1.2)
     for house_num, pts in houses.items():
@@ -463,33 +587,41 @@ def draw_chart_on_pdf_canvas(c, chart_data, x0, y0, side):
         path.close()
         c.drawPath(path, stroke=1, fill=0)
 
-        safe_width, centroid = per_house_geometry[house_num]
-        header, resident_labels, aspect_label = content[house_num]
-        black_lines = resident_labels + ([aspect_label] if aspect_label else [])
+        _, _, centroid = per_house_geometry[house_num]
+        header, resident_labels, aspect_lines = layout[house_num]
+        black_lines = resident_labels + aspect_lines
 
-        cursor = 1.0 + (gap_units if black_lines else 0.0)
-        n_black = len(black_lines)
-        total_span = (cursor - 1.0) + n_black
-        center_offset = total_span / 2.0
-        base_y = centroid[1] + center_offset * line_height  # reportlab y grows upward
-
-        c.setFont("Helvetica", block_font)
-        c.setFillColorRGB(0.18, 0.49, 0.31)  # green
-        c.drawCentredString(centroid[0], base_y, header)
-        c.setFillColorRGB(0, 0, 0)
-
-        y_cursor = base_y - gap_units * line_height
+        cursor = 0.0
+        items = [(header, "header", cursor + header_line_height * 0.8)]
+        cursor += header_line_height
+        if black_lines:
+            cursor += 0.6 * content_line_height
         for ln in resident_labels:
-            y_cursor -= line_height
-            c.setFont("Helvetica-Bold", block_font)
-            c.drawCentredString(centroid[0], y_cursor, ln)
-        if aspect_label:
-            y_cursor -= line_height
-            c.setFont("Helvetica", block_font)
-            c.drawCentredString(centroid[0], y_cursor, aspect_label)
+            items.append((ln, "resident", cursor + content_line_height * 0.8))
+            cursor += content_line_height
+        for ln in aspect_lines:
+            items.append((ln, "aspect", cursor + content_line_height * 0.8))
+            cursor += content_line_height
+
+        # reportlab y grows upward, so "top" of the block is centroid + half height
+        top_y = centroid[1] + cursor / 2.0
+
+        for text, kind, local_y in items:
+            y = top_y - local_y
+            if kind == "header":
+                c.setFont("Helvetica", header_font)
+                c.setFillColorRGB(0.18, 0.49, 0.31)
+                c.drawCentredString(centroid[0], y, text)
+                c.setFillColorRGB(0, 0, 0)
+            elif kind == "resident":
+                c.setFont("Helvetica-Bold", content_font)
+                c.drawCentredString(centroid[0], y, text)
+            else:
+                c.setFont("Helvetica", content_font)
+                c.drawCentredString(centroid[0], y, text)
 
 
-def generate_full_chart_pdf(chart_data):
+def generate_full_chart_pdf(chart_data, chart_title="Your Vedic Birth Chart"):
     from reportlab.pdfgen import canvas as pdfcanvas
     from reportlab.lib.units import inch
     from reportlab.lib.pagesizes import letter
@@ -503,7 +635,7 @@ def generate_full_chart_pdf(chart_data):
     c.drawString(0.75 * inch, page_h - 0.9 * inch, "Read This Before You Try to Interpret")
     c.setFont("Helvetica", 10)
     c.drawString(0.75 * inch, page_h - 1.15 * inch,
-                 f"Your Vedic Birth Chart -- {chart_data['birth']['resolved_address']}")
+                 f"{chart_title} -- {chart_data['birth']['resolved_address']}")
 
     y = page_h - 1.6 * inch
     for heading, body in INTRO_SECTIONS:
@@ -534,37 +666,42 @@ def generate_full_chart_pdf(chart_data):
     # -- Page 2: the chart itself --
     c.showPage()
     c.setFont("Helvetica-Bold", 16)
-    c.drawCentredString(page_w / 2, page_h - 0.7 * inch, "Your Vedic Birth Chart")
+    c.drawCentredString(page_w / 2, page_h - 0.7 * inch, chart_title)
     c.setFont("Helvetica", 9)
     c.drawCentredString(page_w / 2, page_h - 0.9 * inch,
                          f"{chart_data['birth']['local_datetime']} ({chart_data['birth']['timezone']}) "
                          f"-- {chart_data['birth']['resolved_address']}")
 
     # -- Key/legend, explaining the three text styles used in the chart --
-    legend_x = 0.75 * inch
-    legend_y = page_h - 1.15 * inch
-    line_gap = 0.2 * inch
+    c.setFont("Helvetica-Bold", 16)
+    c.setFillColorRGB(0, 0, 0)
+    c.drawString(0.75 * inch, page_h - 1.15 * inch, "Key to the Diagram Above")
 
-    c.setFont("Helvetica-Bold", 9)
+    legend_x = 0.75 * inch
+    legend_y = page_h - 1.5 * inch
+    line_gap = 0.24 * inch
+
+    c.setFont("Helvetica-Bold", 10)
     c.setFillColorRGB(0.18, 0.49, 0.31)
     c.drawString(legend_x, legend_y, "Green")
     c.setFillColorRGB(0, 0, 0)
-    c.setFont("Helvetica", 9)
-    c.drawString(legend_x + 0.55 * inch, legend_y, "= the house number and its sign")
+    c.setFont("Helvetica", 10)
+    c.drawString(legend_x + 0.6 * inch, legend_y, "= the house number and its sign")
 
-    c.setFont("Helvetica-Bold", 9)
+    c.setFont("Helvetica-Bold", 10)
     c.drawString(legend_x, legend_y - line_gap, "Bold black")
-    c.setFont("Helvetica", 9)
-    c.drawString(legend_x + 0.85 * inch, legend_y - line_gap, "= a planet placed in that house")
+    c.setFont("Helvetica", 10)
+    c.drawString(legend_x + 0.95 * inch, legend_y - line_gap, "= a planet placed in that house")
 
-    c.setFont("Helvetica", 9)
+    c.setFont("Helvetica", 10)
     c.drawString(legend_x, legend_y - 2 * line_gap, "Plain black")
-    c.drawString(legend_x + 0.85 * inch, legend_y - 2 * line_gap, "= a planet aspecting that house")
+    c.drawString(legend_x + 0.95 * inch, legend_y - 2 * line_gap, "= a planet aspecting that house")
 
-    chart_side = 7.0 * inch
-    chart_x0 = (page_w - chart_side) / 2
+    chart_width = 7.5 * inch
+    chart_height = 5.0 * inch
+    chart_x0 = (page_w - chart_width) / 2
     chart_y0 = 0.95 * inch
-    draw_chart_on_pdf_canvas(c, chart_data, chart_x0, chart_y0, chart_side)
+    draw_chart_on_pdf_canvas(c, chart_data, chart_x0, chart_y0, chart_width, chart_height)
 
     # -- Page 3: Placements table --
     c.showPage()
@@ -572,7 +709,7 @@ def generate_full_chart_pdf(chart_data):
     c.drawString(0.75 * inch, page_h - 0.9 * inch, "Placements")
     y = page_h - 1.3 * inch
     col_x = [0.75 * inch, 3.5 * inch, 4.8 * inch, 5.8 * inch]
-    headers = ["Body", "Sign", "Degree", "House"]
+    headers = ["Planetary Body", "Sign", "Degree", "House"]
     c.setFont("Helvetica-Bold", 9)
     for cx, h in zip(col_x, headers):
         c.drawString(cx, y, h)
@@ -600,10 +737,10 @@ def generate_full_chart_pdf(chart_data):
     c.showPage()
     c.setFont("Helvetica-Bold", 16)
     c.drawString(0.75 * inch, page_h - 0.9 * inch, "Houses")
-    y = page_h - 1.3 * inch
-    col_x2 = [0.75 * inch, 2.05 * inch, 3.05 * inch, 5.0 * inch]
-    col_widths2 = [1.3 * inch, 1.0 * inch, 1.95 * inch, (page_w - 0.75 * inch) - 5.0 * inch]
-    headers2 = ["House", "Sign", "Planets in this House", "Planets that aspect this House"]
+    y = page_h - 1.5 * inch
+    col_x2 = [0.75 * inch, 2.05 * inch, 3.05 * inch, 5.3 * inch]
+    col_widths2 = [1.3 * inch, 1.0 * inch, 2.25 * inch, (page_w - 0.75 * inch) - 5.3 * inch]
+    headers2 = ["House", "Sign", "Planets in House", "Planets that aspect House"]
 
     def wrap_cell_text(text, max_width, font_size, font="Helvetica"):
         """Word-wraps text to fit max_width, returns a list of lines."""
@@ -631,7 +768,9 @@ def generate_full_chart_pdf(chart_data):
     c.setFont("Helvetica", row_font_size)
 
     for house_data in chart_data["houses"]:
-        bodies_text = ", ".join(f"{b['abbr']} {b['degree']:.1f}\u00b0" for b in house_data["bodies"]) or "None"
+        bodies_text = ", ".join(
+            f"{b['display_name']} ({b['abbr']}) {b['degree']:.1f}\u00b0" for b in house_data["bodies"]
+        ) or "None"
         aspects_text = ", ".join(
             f"{a['display_name']} ({a['abbr']}) {a['degree']:.1f}\u00b0" for a in house_data["aspects"]
         ) or "None"
@@ -682,7 +821,7 @@ def add_cors_headers(response):
 
 
 def parse_birth_args(args):
-    """Shared argument parsing/validation for both endpoints."""
+    """Shared argument parsing/validation for the birth-chart endpoints."""
     required = ["year", "month", "day", "hour", "minute", "city"]
     missing = [r for r in required if r not in args]
     if missing:
@@ -690,6 +829,50 @@ def parse_birth_args(args):
     return (
         int(args["year"]), int(args["month"]), int(args["day"]),
         int(args["hour"]), int(args["minute"]), args["city"],
+    )
+
+
+def parse_coords_args(args):
+    """Shared argument parsing/validation for the "chart for now" endpoints,
+    which take coordinates directly (from the browser's own geolocation)
+    rather than a city name to geocode."""
+    required = ["lat", "lon"]
+    missing = [r for r in required if r not in args]
+    if missing:
+        raise ValueError(f"Missing required parameter(s): {', '.join(missing)}")
+    try:
+        lat = float(args["lat"])
+        lon = float(args["lon"])
+    except ValueError:
+        raise ValueError("lat/lon must be numbers")
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        raise ValueError("lat/lon out of valid range")
+    return lat, lon
+
+
+def compute_chart_for_now(lat, lon):
+    """Chart for the current moment at the given coordinates. Tries to
+    resolve a human-readable place name via reverse geocoding for display
+    purposes; falls back to showing the raw coordinates if that lookup
+    fails or is unavailable, rather than failing the whole request over
+    what's just a cosmetic label."""
+    tf = TimezoneFinder()
+    tz_name = tf.timezone_at(lat=lat, lng=lon)
+    if tz_name is None:
+        raise ValueError(f"Could not determine a timezone for ({lat}, {lon})")
+
+    try:
+        geolocator = Nominatim(user_agent="natal_chart_api")
+        reverse = geolocator.reverse((lat, lon), language="en")
+        location_label = reverse.address if reverse else f"{lat:.4f}, {lon:.4f}"
+    except Exception:
+        location_label = f"{lat:.4f}, {lon:.4f}"
+
+    now_local = dt.datetime.now(ZoneInfo(tz_name))
+    return compute_chart_from_coords(
+        now_local.year, now_local.month, now_local.day,
+        now_local.hour, now_local.minute,
+        lat, lon, location_label,
     )
 
 
@@ -733,6 +916,48 @@ def api_chart_pdf():
             pdf_buffer.read(),
             mimetype="application/pdf",
             headers={"Content-Disposition": "attachment; filename=vedic_birth_chart.pdf"},
+        )
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": f"Unexpected error: {e}"}), 500
+
+
+@app.route("/api/chart-now")
+def api_chart_now():
+    try:
+        lat, lon = parse_coords_args(request.args)
+        chart_data = compute_chart_for_now(lat, lon)
+        return jsonify(chart_data)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": f"Unexpected error: {e}"}), 500
+
+
+@app.route("/api/chart-now-svg")
+def api_chart_now_svg():
+    try:
+        lat, lon = parse_coords_args(request.args)
+        chart_data = compute_chart_for_now(lat, lon)
+        svg = generate_north_indian_chart_svg(chart_data)
+        return Response(svg, mimetype="image/svg+xml")
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": f"Unexpected error: {e}"}), 500
+
+
+@app.route("/api/chart-now-pdf")
+def api_chart_now_pdf():
+    try:
+        lat, lon = parse_coords_args(request.args)
+        chart_data = compute_chart_for_now(lat, lon)
+        pdf_buffer = generate_full_chart_pdf(chart_data, chart_title="The Sky Right Now")
+        return Response(
+            pdf_buffer.read(),
+            mimetype="application/pdf",
+            headers={"Content-Disposition": "attachment; filename=sky_right_now.pdf"},
         )
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
