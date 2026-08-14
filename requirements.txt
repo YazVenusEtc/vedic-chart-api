@@ -3,3 +3,4 @@ pyswisseph
 timezonefinder
 geopy
 gunicorn
+reportlab
