@@ -30,11 +30,31 @@ for notes on what changes before real deployment (e.g. to Render/Railway).
 
 import datetime as dt
 import io
+import os
 import swisseph as swe
 from zoneinfo import ZoneInfo
 from timezonefinder import TimezoneFinder
 from geopy.geocoders import Nominatim
 from flask import Flask, request, jsonify, Response
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+
+# The chart diagram itself (house numbers, planet abbreviations) uses Lora
+# -- a warmer, more elegant serif than reportlab's built-in Times family --
+# specifically for that diagram. Registration is wrapped in a try/except
+# so a missing font file degrades gracefully to Times rather than crashing
+# the whole app (e.g. if the fonts/ folder wasn't deployed alongside this
+# file for some reason).
+_FONTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
+CHART_FONT_REGULAR = "Times-Roman"
+CHART_FONT_BOLD = "Times-Bold"
+try:
+    pdfmetrics.registerFont(TTFont("Lora", os.path.join(_FONTS_DIR, "Lora-Regular.ttf")))
+    pdfmetrics.registerFont(TTFont("Lora-Bold", os.path.join(_FONTS_DIR, "Lora-Bold.ttf")))
+    CHART_FONT_REGULAR = "Lora"
+    CHART_FONT_BOLD = "Lora-Bold"
+except Exception:
+    pass
 
 # ----------------------------------------------------------------------
 # CONFIG -- identical to natal_chart_prototype.py
@@ -44,6 +64,15 @@ FLAG = swe.FLG_SIDEREAL | swe.FLG_MOSEPH | swe.FLG_SPEED
 
 SIGNS = ["Aries", "Taurus", "Gemini", "Cancer", "Leo", "Virgo",
          "Libra", "Scorpio", "Sagittarius", "Capricorn", "Aquarius", "Pisces"]
+
+# Traditional (not modern/outer-planet) sign rulerships -- the classical
+# 7-planet scheme used in Vedic astrology. Rahu and Ketu are lunar nodes,
+# not physical planets, and don't rule any sign in this system.
+SIGN_RULER = {
+    "Aries": "Mars", "Taurus": "Venus", "Gemini": "Mercury", "Cancer": "Moon",
+    "Leo": "Sun", "Virgo": "Mercury", "Libra": "Venus", "Scorpio": "Mars",
+    "Sagittarius": "Jupiter", "Capricorn": "Saturn", "Aquarius": "Saturn", "Pisces": "Jupiter",
+}
 
 BODIES = {
     "Sun": swe.SUN, "Moon": swe.MOON, "Mercury": swe.MERCURY,
@@ -86,6 +115,181 @@ def compute_vedic_aspects(planet_placements):
                 (name, PLANET_ABBR.get(name, name), degree)
             )
     return aspects_by_house
+
+
+# ----------------------------------------------------------------------
+# CLASSICAL PLANET-TO-PLANET ASPECTS (conjunction, sextile, square, trine,
+# opposition) -- degree-based angular relationships between two bodies'
+# actual positions, as distinct from the whole-sign house-based Vedic
+# drishti aspects above. A single, uniform orb is used for all five
+# aspect types, which keeps this simple and predictable rather than
+# trying to replicate every tradition's own variable per-planet orbs.
+# ----------------------------------------------------------------------
+ASPECT_ANGLE_DEFINITIONS = [
+    ("Conjunction", 0),
+    ("Sextile", 60),
+    ("Square", 90),
+    ("Trine", 120),
+    ("Opposition", 180),
+]
+ASPECT_ANGLE_ORB = 6.0  # degrees of allowed deviation from an exact angle
+
+
+def compute_planetary_aspects(bodies):
+    """bodies: list of (display_name, abbr, longitude) tuples -- every
+    body to check pairwise against every other (typically the Ascendant
+    plus all planets). Returns a list of dicts, one per aspect actually
+    found (i.e. within orb), each noting the two bodies, the aspect type,
+    and how many degrees off from exact ("orb") it is."""
+    results = []
+    n = len(bodies)
+    for i in range(n):
+        for j in range(i + 1, n):
+            name1, abbr1, lon1 = bodies[i]
+            name2, abbr2, lon2 = bodies[j]
+            diff = abs(lon1 - lon2) % 360
+            if diff > 180:
+                diff = 360 - diff
+            for aspect_name, exact_deg in ASPECT_ANGLE_DEFINITIONS:
+                orb = abs(diff - exact_deg)
+                if orb <= ASPECT_ANGLE_ORB:
+                    results.append({
+                        "body1": name1, "abbr1": abbr1,
+                        "body2": name2, "abbr2": abbr2,
+                        "aspect": aspect_name,
+                        "orb": round(orb, 2),
+                    })
+    return results
+
+
+# ----------------------------------------------------------------------
+# VIMSHOTTARI DASHA -- the classical Vedic timing system, based on which
+# Nakshatra (lunar mansion) the Moon occupied at birth. A fixed 120-year
+# cycle is divided among 9 planetary lords in a fixed order; each
+# Mahadasha (main period) is itself subdivided into 9 Antardashas (sub
+# periods) in the same order, starting from that Mahadasha's own lord.
+# ----------------------------------------------------------------------
+NAKSHATRA_SPAN = 360.0 / 27  # each nakshatra spans 13 deg 20 min
+DASHA_YEARS = {
+    "Ketu": 7, "Venus": 20, "Sun": 6, "Moon": 10, "Mars": 7,
+    "Rahu": 18, "Jupiter": 16, "Saturn": 19, "Mercury": 17,
+}
+DASHA_ORDER = ["Ketu", "Venus", "Sun", "Moon", "Mars", "Rahu", "Jupiter", "Saturn", "Mercury"]
+DASHA_YEAR_DAYS = 365.25  # standard convention for a "dasha year" in this system
+
+
+def _generate_mahadashas(moon_longitude, birth_dt_utc, cycles=4):
+    """Returns a list of (lord, start_dt, end_dt, full_years) mahadasha
+    periods, starting with the (partial) one active at birth and
+    continuing for several full 120-year cycles -- comfortably more than
+    a lifetime, so any reasonable evaluation date safely falls inside it."""
+    nak_index = int(moon_longitude // NAKSHATRA_SPAN) % 27
+    frac_elapsed = (moon_longitude % NAKSHATRA_SPAN) / NAKSHATRA_SPAN
+    start_lord_index = nak_index % 9
+
+    periods = []
+    first_lord = DASHA_ORDER[start_lord_index]
+    first_full_years = DASHA_YEARS[first_lord]
+    first_balance_years = first_full_years * (1 - frac_elapsed)
+    cursor = birth_dt_utc
+    first_end = cursor + dt.timedelta(days=first_balance_years * DASHA_YEAR_DAYS)
+    periods.append((first_lord, cursor, first_end, first_full_years))
+    cursor = first_end
+
+    lord_idx = start_lord_index
+    for _ in range(9 * cycles):
+        lord_idx = (lord_idx + 1) % 9
+        lord = DASHA_ORDER[lord_idx]
+        full_years = DASHA_YEARS[lord]
+        end = cursor + dt.timedelta(days=full_years * DASHA_YEAR_DAYS)
+        periods.append((lord, cursor, end, full_years))
+        cursor = end
+    return periods
+
+
+def _generate_antardashas(mahadasha_lord, mahadasha_start, mahadasha_full_years):
+    """Returns the 9 Antardasha (sub-period) sub-divisions of a single
+    Mahadasha, each proportional to (sub-lord's own years / 120), in the
+    fixed dasha order starting from the Mahadasha's own lord."""
+    start_idx = DASHA_ORDER.index(mahadasha_lord)
+    periods = []
+    cursor = mahadasha_start
+    for i in range(9):
+        sub_lord = DASHA_ORDER[(start_idx + i) % 9]
+        sub_years = mahadasha_full_years * (DASHA_YEARS[sub_lord] / 120.0)
+        sub_end = cursor + dt.timedelta(days=sub_years * DASHA_YEAR_DAYS)
+        periods.append((sub_lord, cursor, sub_end))
+        cursor = sub_end
+    return periods
+
+
+def compute_vimshottari_dashas(moon_longitude, birth_dt_utc, evaluation_dt_utc,
+                                planet_house, planet_longitude, houses):
+    """Returns {'previous': {...}, 'current': {...}, 'next': {...}}, each
+    with the Antardasha (and its parent Mahadasha) active at that point in
+    the sequence, relative to evaluation_dt_utc -- 'current' is whichever
+    Antardasha evaluation_dt_utc actually falls inside.
+
+    Each period is enriched with reading context: which house each dasha
+    planet is placed in, the angular relationship (aspect) between the two
+    dasha planets, and which houses each dasha planet rules (by sign)."""
+    mahadashas = _generate_mahadashas(moon_longitude, birth_dt_utc)
+
+    all_antardashas = []
+    for lord, start, end, full_years in mahadashas:
+        for sub_lord, sub_start, sub_end in _generate_antardashas(lord, start, full_years):
+            all_antardashas.append({
+                "mahadasha_lord": lord, "antardasha_lord": sub_lord,
+                "start": sub_start, "end": sub_end,
+            })
+
+    current_idx = None
+    for i, period in enumerate(all_antardashas):
+        if period["start"] <= evaluation_dt_utc < period["end"]:
+            current_idx = i
+            break
+    if current_idx is None:
+        current_idx = 0
+
+    def houses_ruled_by(planet_name):
+        return [h["house"] for h in houses if SIGN_RULER.get(h["sign"]) == planet_name]
+
+    def angular_relationship(name1, name2):
+        lon1, lon2 = planet_longitude.get(name1), planet_longitude.get(name2)
+        if lon1 is None or lon2 is None:
+            return "Unknown"
+        diff = abs(lon1 - lon2) % 360
+        if diff > 180:
+            diff = 360 - diff
+        for aspect_name, exact_deg in ASPECT_ANGLE_DEFINITIONS:
+            if abs(diff - exact_deg) <= ASPECT_ANGLE_ORB:
+                return aspect_name
+        return "No major aspect"
+
+    def describe(i):
+        if i < 0 or i >= len(all_antardashas):
+            return None
+        p = all_antardashas[i]
+        maha, antar = p["mahadasha_lord"], p["antardasha_lord"]
+        return {
+            "mahadasha_lord": maha,
+            "mahadasha_display_name": DISPLAY_NAME.get(maha, maha),
+            "mahadasha_house": planet_house.get(maha),
+            "mahadasha_rules_houses": houses_ruled_by(maha),
+            "antardasha_lord": antar,
+            "antardasha_display_name": DISPLAY_NAME.get(antar, antar),
+            "antardasha_house": planet_house.get(antar),
+            "antardasha_rules_houses": houses_ruled_by(antar),
+            "angular_relationship": angular_relationship(maha, antar),
+            "start": p["start"].strftime("%Y-%m-%d"),
+            "end": p["end"].strftime("%Y-%m-%d"),
+        }
+
+    return {
+        "previous": describe(current_idx - 1),
+        "current": describe(current_idx),
+        "next": describe(current_idx + 1),
+    }
 
 
 # ----------------------------------------------------------------------
@@ -152,12 +356,19 @@ def compute_chart_from_coords(year, month, day, hour, minute, lat, lon, location
             "abbr": PLANET_ABBR.get(name, name),
             "sign": sign,
             "degree": round(deg, 2),
+            "longitude": round(p_lon, 4),
             "house": house,
             "retrograde": retro,
+            "meaning": PLANET_MEANINGS.get(name, ""),
         })
 
     graha_placements = [(p["name"], p["house"], p["degree"]) for p in planets]
     aspects_by_house = compute_vedic_aspects(graha_placements)
+
+    aspect_bodies = [("Ascendant", "As", asc_lon)] + [
+        (p["display_name"], p["abbr"], p["longitude"]) for p in planets
+    ]
+    planetary_aspects = compute_planetary_aspects(aspect_bodies)
 
     by_house_bodies = {h: [] for h in range(1, 13)}
     by_house_bodies[1].append({"name": "Ascendant", "display_name": "Ascendant",
@@ -170,9 +381,12 @@ def compute_chart_from_coords(year, month, day, hour, minute, lat, lon, location
 
     houses = []
     for h in range(1, 13):
+        sign = SIGNS[(asc_sign_index + h - 1) % 12]
         houses.append({
             "house": h,
-            "sign": SIGNS[(asc_sign_index + h - 1) % 12],
+            "sign": sign,
+            "ruler": SIGN_RULER.get(sign),
+            "ruler_display_name": DISPLAY_NAME.get(SIGN_RULER.get(sign), SIGN_RULER.get(sign)),
             "bodies": by_house_bodies[h],
             "aspects": [
                 {"name": name, "display_name": DISPLAY_NAME.get(name, name),
@@ -180,6 +394,14 @@ def compute_chart_from_coords(year, month, day, hour, minute, lat, lon, location
                 for name, abbr, degree in aspects_by_house[h]
             ],
         })
+
+    moon_longitude = next(p["longitude"] for p in planets if p["name"] == "Moon")
+    planet_house = {p["name"]: p["house"] for p in planets}
+    planet_longitude = {p["name"]: p["longitude"] for p in planets}
+    dashas = compute_vimshottari_dashas(
+        moon_longitude, utc_dt, dt.datetime.now(dt.timezone.utc),
+        planet_house, planet_longitude, houses,
+    )
 
     return {
         "birth": {
@@ -196,9 +418,12 @@ def compute_chart_from_coords(year, month, day, hour, minute, lat, lon, location
             "sign": asc_sign,
             "degree": round(asc_deg, 2),
             "house": 1,
+            "meaning": PLANET_MEANINGS.get("Ascendant", ""),
         },
         "planets": planets,
         "houses": houses,
+        "planetary_aspects": planetary_aspects,
+        "dashas": dashas,
         "ayanamsa": "Lahiri (sidereal)",
         "house_system": "Whole Sign",
     }
@@ -283,309 +508,157 @@ def wrap_line_to_width(text, max_width, font_size, avg_char_ratio=0.56):
     return lines
 
 
+PLANET_COLORS = {
+    "Sun": "#B8860B", "Moon": "#4A4A4A", "Mercury": "#2F6F5E",
+    "Venus": "#8B3A5C", "Mars": "#8B2E2E", "Jupiter": "#3B4A8B",
+    "Saturn": "#4A3B6B", "Rahu": "#6B4A8B", "Ketu": "#2F6F6F",
+    "Ascendant": "#1A1A1A", "Uranus": "#5C7A7A", "Neptune": "#5C7A9A", "Pluto": "#6B5C4A",
+}
+CHART_LINE_COLOR = "#C4A876"   # muted gold/tan
+CHART_NUMBER_COLOR = "#C4A876"  # same tone, slightly different weight in use
+
+
 def _house_text_content(chart_data):
     """Shared between the SVG and PDF chart drawers: for every house,
-    returns (header_text, resident_labels, aspect_label) using the
-    current formatting rules -- no 'House' word in the header (just
-    'N : Sign'), and aspect labels include each aspecting planet's
-    degree with no 'Asp:' prefix."""
-    asc_sign = chart_data["ascendant"]["sign"]
-    asc_index = SIGNS.index(asc_sign)
-    house_sign = {h: SIGNS[(asc_index + h - 1) % 12] for h in range(1, 13)}
-
+    returns (house_num, list of (abbr, color) for each resident body).
+    No sign name, no degrees, no aspects -- the diagram itself only shows
+    which bodies sit in which house; a separate Key/table covers the rest."""
     by_house = {h: [] for h in range(1, 13)}
-    by_house[1].append(("Ascendant", chart_data["ascendant"]["degree"]))
-    graha_placements = []
+    by_house[1].append(("As", PLANET_COLORS["Ascendant"]))
     for p in chart_data["planets"]:
-        by_house[p["house"]].append((p["name"], p["degree"]))
-        graha_placements.append((p["name"], p["house"], p["degree"]))
-    aspects_by_house = compute_vedic_aspects(graha_placements)
+        abbr = PLANET_ABBR.get(p["name"], p["name"])
+        color = PLANET_COLORS.get(p["name"], "#333333")
+        by_house[p["house"]].append((abbr, color))
 
     content = {}
     for house_num in range(1, 13):
-        header = f"{house_num} : {house_sign[house_num]}"
-        occupants = by_house[house_num]
-        resident_labels = [f"{PLANET_ABBR.get(n, n)} {d:.1f}\u00b0" for n, d in occupants]
-        aspecting = aspects_by_house[house_num]
-        aspect_label = (", ".join(f"{abbr} {deg:.1f}\u00b0" for _, abbr, deg in aspecting)
-                         if aspecting else None)
-        content[house_num] = (header, resident_labels, aspect_label)
+        content[house_num] = by_house[house_num]
     return content
 
 
-def generate_north_indian_chart_svg(chart_data, canvas_width=1600, canvas_height=1000):
-    margin_x = canvas_width * 0.05
-    margin_y = canvas_height * 0.08
+def generate_north_indian_chart_svg(chart_data, canvas_width=1200, canvas_height=1000):
+    margin_x = canvas_width * 0.07
+    margin_y = canvas_height * 0.10
     width = canvas_width - 2 * margin_x
     height = canvas_height - 2 * margin_y
     x0, y0 = margin_x, margin_y
     houses = build_house_polygons(x0, y0, width, height)
     content = _house_text_content(chart_data)
+    center_x, center_y = x0 + width / 2, y0 + height / 2
 
     svg_lines = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{canvas_width}" '
         f'height="{canvas_height}" viewBox="0 0 {canvas_width} {canvas_height}">',
-        f'<rect x="0" y="0" width="{canvas_width}" height="{canvas_height}" fill="#f0f5ff"/>',
+        '<defs>',
+        '<radialGradient id="vbcCenterGlow" cx="50%" cy="50%" r="50%">',
+        '<stop offset="0%" stop-color="#E8ECFB" stop-opacity="0.9"/>',
+        '<stop offset="60%" stop-color="#EEF1FC" stop-opacity="0.5"/>',
+        '<stop offset="100%" stop-color="#F5F7FD" stop-opacity="0"/>',
+        '</radialGradient>',
+        '</defs>',
+        f'<rect x="0" y="0" width="{canvas_width}" height="{canvas_height}" fill="white"/>',
+        f'<text x="{canvas_width/2}" y="{margin_y * 0.5}" text-anchor="middle" '
+        f'font-family="sans-serif" font-size="15" letter-spacing="3" fill="#9C9488">'
+        f'NORTH INDIAN &#183; WHOLE SIGN HOUSES</text>',
     ]
 
-    HOUSE_HEADER_GREEN = "#587326"
-    HEADER_FONT_RATIO = 0.72  # header renders smaller than the actual content
-    CONTENT_CANDIDATES = [56, 52, 48, 44, 40, 36, 32, 28, 26, 24, 22, 20, 18, 16, 14, 12, 10, 8]
+    glow_r = min(width, height) * 0.16
+    svg_lines.append(f'<circle cx="{center_x}" cy="{center_y}" r="{glow_r}" fill="url(#vbcCenterGlow)"/>')
 
-    per_house_geometry = {}
-    for house_num, pts in houses.items():
-        bbox_w = polygon_bbox(pts)[2] - polygon_bbox(pts)[0]
-        bbox_h = polygon_bbox(pts)[3] - polygon_bbox(pts)[1]
-        # Two different width budgets: safe_width (conservative, min-based)
-        # still governs the height math and single-item checks; wrap_width
-        # is more generous and specifically governs how many items get
-        # combined onto one line when wrapping a long aspect list --
-        # letting a crowded house's list get WIDER rather than just
-        # taller, which is what was actually overflowing before.
-        safe_width = min(bbox_w, bbox_h) * 0.62
-        wrap_width = bbox_w * 0.80
-        safe_height = bbox_h * 0.70
-        per_house_geometry[house_num] = (safe_width, wrap_width, safe_height, polygon_centroid(pts))
-
-    def fits_canvas(centroid_x, text, font_size):
-        """The real, final safety check: does this specific line of text,
-        centered at this specific point, actually stay within the canvas's
-        own outer margins? This is what actually prevents overflow off the
-        page -- the per-house safe_width figures above are just heuristics
-        to guide font/wrap choices, not a substitute for checking the real
-        boundary directly."""
-        half = estimate_text_width(text, font_size) / 2.0
-        return (centroid_x - half) >= margin_x * 0.4 and (centroid_x + half) <= (canvas_width - margin_x * 0.4)
-
-    def layout_fits(content_font):
-        """Tries to lay out every house at this content font size (with
-        aspect-list wrapping applied as needed). Returns the per-house
-        layout dict if everything fits, else None."""
-        header_font = max(int(content_font * HEADER_FONT_RATIO), 8)
-        header_line_height = header_font * 1.2
-        content_line_height = content_font * 1.2
-        layout = {}
-        for house_num, pts in houses.items():
-            safe_width, wrap_width, safe_height, centroid = per_house_geometry[house_num]
-            header, resident_labels, aspect_label = content[house_num]
-
-            if not fits_canvas(centroid[0], header, header_font):
-                return None
-            if any(not fits_canvas(centroid[0], r, content_font) for r in resident_labels):
-                return None
-
-            aspect_lines = wrap_line_to_width(aspect_label, wrap_width, content_font) if aspect_label else []
-            if any(not fits_canvas(centroid[0], ln, content_font) for ln in aspect_lines):
-                return None
-
-            black_lines = resident_labels + aspect_lines
-            gap = 0.6 * content_line_height if black_lines else 0.0
-            total_height = header_line_height + gap + len(black_lines) * content_line_height
-            if total_height > safe_height:
-                return None
-
-            layout[house_num] = (header, resident_labels, aspect_lines)
-        return layout, header_font, content_font
-
-    result = None
-    for candidate in CONTENT_CANDIDATES:
-        result = layout_fits(candidate)
-        if result is not None:
-            break
-    if result is None:
-        # extreme fallback -- should not normally happen
-        result = layout_fits(CONTENT_CANDIDATES[-1]) or (
-            {h: (content[h][0], content[h][1], [content[h][2]] if content[h][2] else [])
-             for h in range(1, 13)},
-            8, 8,
-        )
-    layout, header_font, content_font = result
-    header_line_height = header_font * 1.2
-    content_line_height = content_font * 1.2
+    NUMBER_FONT = max(int(min(width, height) * 0.028), 14)
+    BODY_FONT = max(int(min(width, height) * 0.034), 16)
+    line_height = BODY_FONT * 1.25
 
     for house_num, pts in houses.items():
         points_str = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
         svg_lines.append(
             f'<polygon points="{points_str}" fill="none" '
-            f'stroke="black" stroke-width="1.5"/>'
+            f'stroke="{CHART_LINE_COLOR}" stroke-width="1.3"/>'
         )
 
-        _, _, _, centroid = per_house_geometry[house_num]
-        header, resident_labels, aspect_lines = layout[house_num]
-        black_lines = resident_labels + aspect_lines
+        centroid = polygon_centroid(pts)
+        bbox = polygon_bbox(pts)
 
-        cursor = 0.0
-        items = [(header, "header", cursor + header_line_height * 0.8)]
-        cursor += header_line_height
-        if black_lines:
-            cursor += 0.6 * content_line_height
-        for ln in resident_labels:
-            items.append((ln, "resident", cursor + content_line_height * 0.8))
-            cursor += content_line_height
-        for ln in aspect_lines:
-            items.append((ln, "aspect", cursor + content_line_height * 0.8))
-            cursor += content_line_height
+        # Number sits offset toward this house's own outer corner (away
+        # from the chart's center), out of the way of the stacked bodies.
+        dx, dy = centroid[0] - center_x, centroid[1] - center_y
+        dist = max((dx ** 2 + dy ** 2) ** 0.5, 1)
+        ux, uy = dx / dist, dy / dist
+        offset = min(bbox[2] - bbox[0], bbox[3] - bbox[1]) * 0.34
+        num_x, num_y = centroid[0] + ux * offset, centroid[1] + uy * offset
 
-        top_y = centroid[1] - cursor / 2.0
+        svg_lines.append(
+            f'<text x="{num_x:.1f}" y="{num_y:.1f}" font-size="{NUMBER_FONT}" '
+            f'text-anchor="middle" fill="{CHART_NUMBER_COLOR}" '
+            f'font-family="Fraunces, serif">{house_num}</text>'
+        )
 
-        for text, kind, local_y in items:
-            if kind == "header":
-                style_attr = f'font-weight="bold" fill="{HOUSE_HEADER_GREEN}"'
-                fsize = header_font
-            elif kind == "resident":
-                style_attr = 'font-weight="bold" fill="black"'
-                fsize = content_font
-            else:  # aspect
-                style_attr = 'fill="black"'
-                fsize = content_font
-            svg_lines.append(
-                f'<text x="{centroid[0]:.1f}" y="{top_y + local_y:.1f}" '
-                f'font-size="{fsize}" text-anchor="middle" '
-                f'{style_attr} '
-                f'font-family="sans-serif">{text}</text>'
-            )
+        bodies = content[house_num]
+        if bodies:
+            total_h = len(bodies) * line_height
+            top_y = centroid[1] - total_h / 2 + line_height * 0.75
+            for i, (abbr, color) in enumerate(bodies):
+                svg_lines.append(
+                    f'<text x="{centroid[0]:.1f}" y="{top_y + i * line_height:.1f}" '
+                    f'font-size="{BODY_FONT}" text-anchor="middle" fill="{color}" '
+                    f'font-family="Fraunces, serif">{abbr}</text>'
+                )
+
+    # Round the outer 4 corners: mask each sharp point with a white square
+    # positioned to extend inward from that corner, then draw a proper
+    # rounded rectangle outline on top as the clean visual border. (SVG's
+    # own coordinate space doesn't flip like PDF's does, so the inward
+    # directions here are the straightforward top-down ones.)
+    corner_r = min(width, height) * 0.035
+    mask_size = corner_r * 2.2
+    corners = [(x0, y0), (x0 + width, y0), (x0 + width, y0 + height), (x0, y0 + height)]
+    inward = [(1, 1), (-1, 1), (-1, -1), (1, -1)]
+    for (cx, cy), (ix, iy) in zip(corners, inward):
+        rect_x = cx if ix > 0 else cx - mask_size
+        rect_y = cy if iy > 0 else cy - mask_size
+        svg_lines.append(f'<rect x="{rect_x:.1f}" y="{rect_y:.1f}" width="{mask_size:.1f}" '
+                          f'height="{mask_size:.1f}" fill="white"/>')
+
+    svg_lines.append(
+        f'<rect x="{x0:.1f}" y="{y0:.1f}" width="{width:.1f}" height="{height:.1f}" '
+        f'rx="{corner_r:.1f}" ry="{corner_r:.1f}" fill="none" '
+        f'stroke="{CHART_LINE_COLOR}" stroke-width="1.4"/>'
+    )
 
     svg_lines.append('</svg>')
     return "\n".join(svg_lines)
-
-
-# ----------------------------------------------------------------------
-# FULL PDF REPORT -- intro/explanation page, the chart itself, and both
-# tables, all in one downloadable document.
-# ----------------------------------------------------------------------
-INTRO_SECTIONS = [
-    ("What is this chart?",
-     "This is your natal (birth) chart, calculated using the sidereal "
-     "zodiac with the Lahiri ayanamsa -- the system used in traditional "
-     "Vedic (Jyotish) astrology. It's a snapshot of exactly where the Sun, "
-     "Moon, and every planet were positioned at the moment and place you "
-     "were born."),
-    ("The Ascendant (marked 'As')",
-     "Your Ascendant is the zodiac sign that was rising on the eastern "
-     "horizon at your exact birth time. It always defines House 1 -- "
-     "everything else in the chart is read relative to it."),
-    ("Houses",
-     "The chart is divided into 12 houses, each representing a different "
-     "area of life (self, money, communication, home, and so on). This "
-     "chart uses the Whole Sign house system: House 1 is always your "
-     "Ascendant's entire sign, and each house that follows is simply the "
-     "next sign in zodiac order."),
-    ("North Node (Rahu) and South Node (Ketu) -- The Lunar Nodes",
-     "Rahu (the North Node) and Ketu (the South Node) aren't physical "
-     "planets -- they're the two points where the Moon's orbital path "
-     "crosses the Sun's."),
-    ("Retrograde",
-     "A planet marked RETROGRADE appeared to be moving backward through "
-     "the zodiac from Earth's point of view at the moment of your birth "
-     "-- a real, if temporary, optical effect of orbital mechanics, "
-     "traditionally considered to change how that planet's energy "
-     "expresses itself."),
-]
-
-
 def draw_chart_on_pdf_canvas(c, chart_data, x0, y0, width, height):
     """Draws the North Indian chart directly onto a reportlab canvas at
     the given position/size (reportlab's own bottom-up coordinate system).
-    Mirrors generate_north_indian_chart_svg's logic exactly, just with
-    reportlab drawing calls instead of building an SVG string."""
+    Matches generate_north_indian_chart_svg's new minimal style: thin gold
+    lines, small house numbers offset toward each house's outer corner,
+    and colored planet abbreviations stacked at the centroid -- no signs,
+    no degrees, no aspects shown inline anymore."""
     houses = build_house_polygons(x0, y0, width, height)
     content = _house_text_content(chart_data)
+    center_x, center_y = x0 + width / 2, y0 + height / 2
 
     def to_pdf_point(pt):
-        # This function draws in a top-down coordinate space (y increases
-        # downward, matching build_house_polygons' convention) -- this
-        # converts a point into reportlab's actual bottom-up page space.
-        x, y = pt
-        return x, (y0 * 2 + height) - y  # mirror around the shape's own vertical center
+        px, py = pt
+        return px, (y0 * 2 + height) - py
 
-    def best_size(text, font, safe_width, candidates=(28, 24, 20, 18, 16, 14, 13, 12, 11, 10, 9, 8, 7, 6)):
-        for size in candidates:
-            if c.stringWidth(text, font, size) <= safe_width:
-                return size
-        return candidates[-1]
+    # Soft decorative glow at the center -- reportlab has no native radial
+    # gradient, so this approximates one with a few concentric,
+    # increasingly transparent circles.
+    glow_r = min(width, height) * 0.16
+    glow_pdf_center = to_pdf_point((center_x, center_y))
+    for frac, alpha in [(1.0, 0.10), (0.7, 0.16), (0.4, 0.22)]:
+        c.saveState()
+        c.setFillColorRGB(0.91, 0.93, 0.99, alpha=alpha)
+        c.circle(glow_pdf_center[0], glow_pdf_center[1], glow_r * frac, stroke=0, fill=1)
+        c.restoreState()
 
-    def wrap_pdf(text, safe_width, font, size):
-        items = text.split(", ")
-        lines, current = [], ""
-        for item in items:
-            trial = (current + ", " + item) if current else item
-            if c.stringWidth(trial, font, size) <= safe_width or not current:
-                current = trial
-            else:
-                lines.append(current)
-                current = item
-        if current:
-            lines.append(current)
-        return lines
+    NUMBER_FONT = max(int(min(width, height) * 0.034), 9)
+    BODY_FONT = max(int(min(width, height) * 0.040), 10)
+    line_height = BODY_FONT * 1.25
 
-    HEADER_FONT_RATIO = 0.72
-    CONTENT_CANDIDATES = [40, 36, 32, 28, 26, 24, 22, 20, 18, 16, 14, 13, 12, 11, 10, 9, 8, 7, 6]
-
-    per_house_geometry = {}
-    for house_num, pts in houses.items():
-        bbox_w = polygon_bbox(pts)[2] - polygon_bbox(pts)[0]
-        bbox_h = polygon_bbox(pts)[3] - polygon_bbox(pts)[1]
-        safe_width = min(bbox_w, bbox_h) * 0.62
-        wrap_width = bbox_w * 0.80
-        safe_height = bbox_h * 0.70
-        per_house_geometry[house_num] = (safe_width, wrap_width, safe_height, to_pdf_point(polygon_centroid(pts)))
-
-    def fits_canvas_pdf(centroid_x, text, font, size):
-        """Real final safety check against the chart's own declared drawing
-        area (x0 to x0+width) -- see the matching note in the SVG version."""
-        half = c.stringWidth(text, font, size) / 2.0
-        buffer = width * 0.015
-        return (centroid_x - half) >= (x0 + buffer) and (centroid_x + half) <= (x0 + width - buffer)
-
-    def layout_fits(content_font):
-        header_font = max(int(content_font * HEADER_FONT_RATIO), 6)
-        header_line_height = header_font * 1.3
-        content_line_height = content_font * 1.3
-        layout = {}
-        for house_num, pts in houses.items():
-            safe_width, wrap_width, safe_height, centroid = per_house_geometry[house_num]
-            header, resident_labels, aspect_label = content[house_num]
-
-            if not fits_canvas_pdf(centroid[0], header, "Times-Bold", header_font):
-                return None
-            if any(not fits_canvas_pdf(centroid[0], r, "Times-Bold", content_font) for r in resident_labels):
-                return None
-
-            aspect_lines = wrap_pdf(aspect_label, wrap_width, "Times-Roman", content_font) if aspect_label else []
-            if any(not fits_canvas_pdf(centroid[0], ln, "Times-Roman", content_font) for ln in aspect_lines):
-                return None
-
-            black_lines = resident_labels + aspect_lines
-            gap = 0.6 * content_line_height if black_lines else 0.0
-            total_height = header_line_height + gap + len(black_lines) * content_line_height
-            if total_height > safe_height:
-                return None
-
-            layout[house_num] = (header, resident_labels, aspect_lines)
-        return layout, header_font, content_font
-
-    result = None
-    for candidate in CONTENT_CANDIDATES:
-        result = layout_fits(candidate)
-        if result is not None:
-            break
-    if result is None:
-        header_font = max(int(CONTENT_CANDIDATES[-1] * HEADER_FONT_RATIO), 6)
-        layout = {}
-        for house_num in range(1, 13):
-            header, resident_labels, aspect_label = content[house_num]
-            layout[house_num] = (header, resident_labels, [aspect_label] if aspect_label else [])
-        result = (layout, header_font, CONTENT_CANDIDATES[-1])
-    layout, header_font, content_font = result
-    header_line_height = header_font * 1.3
-    content_line_height = content_font * 1.3
-
-    # Background tint behind the chart specifically (not the whole page)
-    c.setFillColorRGB(0.941, 0.961, 1.0)  # #f0f5ff
-    c.rect(x0, y0, width, height, stroke=0, fill=1)
-    c.setFillColorRGB(0, 0, 0)
-
-    c.setLineWidth(1.2)
+    c.setLineWidth(1.0)
+    c.setStrokeColorRGB(0.769, 0.659, 0.463)  # #C4A876 muted gold
     for house_num, pts in houses.items():
         pdf_pts = [to_pdf_point(p) for p in pts]
         path = c.beginPath()
@@ -595,38 +668,59 @@ def draw_chart_on_pdf_canvas(c, chart_data, x0, y0, width, height):
         path.close()
         c.drawPath(path, stroke=1, fill=0)
 
-        _, _, _, centroid = per_house_geometry[house_num]
-        header, resident_labels, aspect_lines = layout[house_num]
-        black_lines = resident_labels + aspect_lines
+        centroid_td = polygon_centroid(pts)
+        bbox = polygon_bbox(pts)
+        dx, dy = centroid_td[0] - center_x, centroid_td[1] - center_y
+        dist = max((dx ** 2 + dy ** 2) ** 0.5, 1)
+        ux, uy = dx / dist, dy / dist
+        offset = min(bbox[2] - bbox[0], bbox[3] - bbox[1]) * 0.34
+        num_td = (centroid_td[0] + ux * offset, centroid_td[1] + uy * offset)
+        num_pdf = to_pdf_point(num_td)
 
-        cursor = 0.0
-        items = [(header, "header", cursor + header_line_height * 0.8)]
-        cursor += header_line_height
-        if black_lines:
-            cursor += 0.6 * content_line_height
-        for ln in resident_labels:
-            items.append((ln, "resident", cursor + content_line_height * 0.8))
-            cursor += content_line_height
-        for ln in aspect_lines:
-            items.append((ln, "aspect", cursor + content_line_height * 0.8))
-            cursor += content_line_height
+        c.setFont(CHART_FONT_REGULAR, NUMBER_FONT)
+        c.setFillColorRGB(0.769, 0.659, 0.463)
+        c.drawCentredString(num_pdf[0], num_pdf[1] - NUMBER_FONT * 0.35, str(house_num))
 
-        # reportlab y grows upward, so "top" of the block is centroid + half height
-        top_y = centroid[1] + cursor / 2.0
+        centroid_pdf = to_pdf_point(centroid_td)
+        bodies = content[house_num]
+        if bodies:
+            total_h = len(bodies) * line_height
+            top_y = centroid_pdf[1] + total_h / 2 - line_height * 0.75
+            c.setFont(CHART_FONT_REGULAR, BODY_FONT)
+            for i, (abbr, color_hex) in enumerate(bodies):
+                r = int(color_hex[1:3], 16) / 255
+                g = int(color_hex[3:5], 16) / 255
+                b = int(color_hex[5:7], 16) / 255
+                c.setFillColorRGB(r, g, b)
+                c.drawCentredString(centroid_pdf[0], top_y - i * line_height, abbr)
+    c.setFillColorRGB(0, 0, 0)
 
-        for text, kind, local_y in items:
-            y = top_y - local_y
-            if kind == "header":
-                c.setFont("Times-Bold", header_font)
-                c.setFillColorRGB(0.346, 0.45, 0.15)
-                c.drawCentredString(centroid[0], y, text)
-                c.setFillColorRGB(0, 0, 0)
-            elif kind == "resident":
-                c.setFont("Times-Bold", content_font)
-                c.drawCentredString(centroid[0], y, text)
-            else:
-                c.setFont("Times-Roman", content_font)
-                c.drawCentredString(centroid[0], y, text)
+    # Round the outer 4 corners specifically: mask each sharp point with a
+    # white square (sized and positioned to cover just that corner,
+    # offset inward so it doesn't touch the house numbers/bodies), then
+    # stroke a proper rounded rectangle on top as the clean visual border.
+    corner_r = min(width, height) * 0.035
+    mask_size = corner_r * 2.2
+    corners_td = [(x0, y0), (x0 + width, y0), (x0 + width, y0 + height), (x0, y0 + height)]
+    # Inward direction for each corner, in PDF's own coordinate space (not
+    # top-down space -- the y-axis flips between the two, so these are
+    # deliberately different from a naive top-down inward guess).
+    inward = [(1, -1), (-1, -1), (-1, 1), (1, 1)]
+    c.setFillColorRGB(1, 1, 1)
+    for (cx_td, cy_td), (ix, iy) in zip(corners_td, inward):
+        cx, cy = to_pdf_point((cx_td, cy_td))
+        rect_x = cx if ix > 0 else cx - mask_size
+        rect_y = cy if iy > 0 else cy - mask_size
+        c.rect(rect_x, rect_y, mask_size, mask_size, stroke=0, fill=1)
+
+    c.setStrokeColorRGB(0.769, 0.659, 0.463)
+    c.setLineWidth(1.3)
+    outer_pdf = [to_pdf_point(p) for p in corners_td]
+    rr_x = min(p[0] for p in outer_pdf)
+    rr_y = min(p[1] for p in outer_pdf)
+    rr_w = max(p[0] for p in outer_pdf) - rr_x
+    rr_h = max(p[1] for p in outer_pdf) - rr_y
+    c.roundRect(rr_x, rr_y, rr_w, rr_h, corner_r, stroke=1, fill=0)
 
 
 def draw_mini_house_diagram(c, pdf_x0, pdf_y0, size):
@@ -646,7 +740,7 @@ def draw_mini_house_diagram(c, pdf_x0, pdf_y0, size):
     c.setLineWidth(0.8)
     c.setStrokeColorRGB(0, 0, 0)
     font_size = max(int(size * 0.11), 7)
-    c.setFont("Times-Roman", font_size)
+    c.setFont(CHART_FONT_REGULAR, font_size)
     for house_num, pts in local_houses.items():
         pdf_pts = [to_pdf(p) for p in pts]
         path = c.beginPath()
@@ -657,6 +751,69 @@ def draw_mini_house_diagram(c, pdf_x0, pdf_y0, size):
         c.drawPath(path, stroke=1, fill=0)
         cx, cy = to_pdf(polygon_centroid(pts))
         c.drawCentredString(cx, cy - font_size * 0.32, str(house_num))
+
+
+INTRO_SECTIONS = [
+    ("What is this chart?",
+     "This is your natal (birth) chart, calculated using the sidereal "
+     "zodiac with the Lahiri ayanamsa -- the system used in traditional "
+     "Vedic (Jyotish) astrology. It's a snapshot of exactly where the Sun, "
+     "Moon, and every planet were positioned at the moment and place you "
+     "were born."),
+    ("The Ascendant (marked 'As')",
+     "Your Ascendant is the zodiac sign that was rising on the eastern "
+     "horizon at your exact birth time. It always defines House 1 -- "
+     "everything else in the chart is read relative to it. The Ascendant "
+     "will always fall in the first house, in every chart."),
+    ("Houses",
+     "The chart is divided into 12 houses, each representing a different "
+     "area of life (self, money, communication, home, and so on). This "
+     "chart uses the Whole Sign house system: House 1 is always your "
+     "Ascendant's entire sign, and each house that follows is simply the "
+     "next sign in zodiac order."),
+    ("North Node (Rahu) and South Node (Ketu) -- The Lunar Nodes",
+     "Rahu (the North Node) and Ketu (the South Node) aren't physical "
+     "planets -- they're the two points where the Moon's orbital path "
+     "crosses the Sun's."),
+    ("Retrograde",
+     "A planet marked RETROGRADE appeared to be moving backward through "
+     "the zodiac from Earth's point of view at the moment of your birth "
+     "-- a real, if temporary, optical effect of orbital mechanics, "
+     "traditionally considered to change how that planet's energy "
+     "expresses itself."),
+]
+
+
+PLANET_MEANINGS = {
+    "Moon": "the mind, emotions, and instinctive reactions -- how you feel and process life day to day.",
+    "Sun": "the core self, willpower, and vitality -- how you shine and lead.",
+    "Mercury": "communication, intellect, and reasoning -- how you think and express ideas.",
+    "Venus": "love, beauty, and pleasure -- what you're drawn to and how you relate to others.",
+    "Mars": "drive, courage, and assertion -- how you act and pursue what you want.",
+    "Jupiter": "growth, wisdom, and fortune -- where life expands and offers meaning.",
+    "Saturn": "discipline, limitation, and time -- where you mature through effort and restriction.",
+    "Rahu": "worldly desire and forward momentum -- what you're pulled toward growing into.",
+    "Ketu": "detachment and past mastery -- what comes naturally but calls for release.",
+    "Uranus": "sudden change, originality, and rebellion -- where you break from convention.",
+    "Neptune": "imagination, spirituality, and illusion -- where boundaries dissolve.",
+    "Pluto": "deep transformation, power, and rebirth -- where old structures break down and remake themselves.",
+    "Ascendant": "the outer personality and how you meet the world -- the lens the whole chart is read through.",
+}
+
+HOUSE_MEANINGS = {
+    1: "self, body, and outward personality -- how you present to the world.",
+    2: "wealth, family, speech, and personal values.",
+    3: "courage, siblings, effort, and short journeys.",
+    4: "home, mother, emotional foundation, and inner comfort.",
+    5: "creativity, romance, children, and intelligence.",
+    6: "health, daily work, obstacles, and conflict.",
+    7: "partnership, marriage, and one-on-one relationships.",
+    8: "transformation, shared resources, and the unknown.",
+    9: "higher learning, philosophy, fortune, and long journeys.",
+    10: "career, public standing, and life direction.",
+    11: "gains, community, and hopes for the future.",
+    12: "release, solitude, and what lies beyond the material.",
+}
 
 
 def generate_full_chart_pdf(chart_data, chart_title="Your Vedic Birth Chart"):
@@ -729,30 +886,57 @@ def generate_full_chart_pdf(chart_data, chart_title="Your Vedic Birth Chart"):
                          f"{chart_data['birth']['local_datetime']} ({chart_data['birth']['timezone']}) "
                          f"-- {chart_data['birth']['resolved_address']}")
 
-    # -- Key/legend, explaining the three text styles used in the chart --
+    # -- Key/legend, explaining how to read the diagram --
     c.setFont("Times-Bold", 16)
     c.setFillColorRGB(0, 0, 0)
     c.drawString(0.75 * inch, page_h - 1.15 * inch, "Key to the Diagram Above")
 
-    legend_x = 0.75 * inch
-    legend_y = page_h - 1.5 * inch
-    line_gap = 0.24 * inch
-
-    c.setFont("Times-Bold", 10)
-    c.setFillColorRGB(0.346, 0.45, 0.15)
-    c.drawString(legend_x, legend_y, "Green")
+    c.setFont("Times-Roman", 9)
+    c.setFillColorRGB(0.769, 0.659, 0.463)
+    c.drawString(0.75 * inch, page_h - 1.4 * inch, "\u25cf")
     c.setFillColorRGB(0, 0, 0)
-    c.setFont("Times-Roman", 10)
-    c.drawString(legend_x + 0.6 * inch, legend_y, "= the house number and its sign")
+    intro_note = ("The small gold number in each section is that house's number (1-12). "
+                   "See the table below for which sign each house number corresponds to in this chart.")
 
-    c.setFont("Times-Bold", 10)
-    c.drawString(legend_x, legend_y - line_gap, "Bold black")
-    c.setFont("Times-Roman", 10)
-    c.drawString(legend_x + 0.95 * inch, legend_y - line_gap, "= a planet placed in that house")
+    def _wrap_simple(text, max_width, size):
+        words, lines, line = text.split(), [], ""
+        for word in words:
+            trial = (line + " " + word).strip()
+            if c.stringWidth(trial, "Times-Roman", size) > max_width and line:
+                lines.append(line)
+                line = word
+            else:
+                line = trial
+        if line:
+            lines.append(line)
+        return lines
 
-    c.setFont("Times-Roman", 10)
-    c.drawString(legend_x, legend_y - 2 * line_gap, "Plain black")
-    c.drawString(legend_x + 0.95 * inch, legend_y - 2 * line_gap, "= a planet aspecting that house")
+    for i, ln in enumerate(_wrap_simple(intro_note, page_w - 1.9 * inch, 9)):
+        c.drawString(0.95 * inch, page_h - 1.4 * inch - i * 0.16 * inch, ln)
+
+    legend_bodies = [
+        ("As", "Ascendant"), ("Su", "Sun"), ("Mo", "Moon"), ("Me", "Mercury"), ("Ve", "Venus"),
+        ("Ma", "Mars"), ("Ju", "Jupiter"), ("Sa", "Saturn"), ("Ra", "North Node (Rahu)"), ("Ke", "South Node (Ketu)"),
+        ("Ur", "Uranus"), ("Ne", "Neptune"), ("Pl", "Pluto"),
+    ]
+    body_key_map = {"As": "Ascendant", "Su": "Sun", "Mo": "Moon", "Me": "Mercury", "Ve": "Venus",
+                     "Ma": "Mars", "Ju": "Jupiter", "Sa": "Saturn", "Ra": "Rahu", "Ke": "Ketu",
+                     "Ur": "Uranus", "Ne": "Neptune", "Pl": "Pluto"}
+    legend_y0 = page_h - 1.85 * inch
+    col_x = [0.95 * inch, 3.0 * inch, 5.05 * inch]
+    for i, (abbr, name) in enumerate(legend_bodies):
+        col = i % 3
+        row = i // 3
+        x = col_x[col]
+        y = legend_y0 - row * 0.22 * inch
+        color_hex = PLANET_COLORS.get(body_key_map[abbr], "#333333")
+        r, g, b = int(color_hex[1:3], 16) / 255, int(color_hex[3:5], 16) / 255, int(color_hex[5:7], 16) / 255
+        c.setFont("Times-Bold", 9)
+        c.setFillColorRGB(r, g, b)
+        c.drawString(x, y, abbr)
+        c.setFillColorRGB(0, 0, 0)
+        c.setFont("Times-Roman", 9)
+        c.drawString(x + 0.32 * inch, y, name)
 
     chart_width = 7.5 * inch
     chart_height = 5.0 * inch
@@ -760,53 +944,11 @@ def generate_full_chart_pdf(chart_data, chart_title="Your Vedic Birth Chart"):
     chart_y0 = 0.95 * inch
     draw_chart_on_pdf_canvas(c, chart_data, chart_x0, chart_y0, chart_width, chart_height)
 
-    # -- Page 3: Placements table --
-    c.showPage()
-    c.setFont("Times-Bold", 16)
-    c.drawString(0.75 * inch, page_h - 0.9 * inch, "Placements")
-    y = page_h - 1.3 * inch
-    col_x = [0.75 * inch, 3.5 * inch, 4.8 * inch, 5.8 * inch]
-    headers = ["Planetary Body", "Sign", "Degree", "House"]
-    c.setFont("Times-Bold", 9)
-    for cx, h in zip(col_x, headers):
-        c.drawString(cx, y, h)
-    y -= 0.22 * inch
-    c.setFont("Times-Roman", 9)
-
-    rows = [("Ascendant", "As", chart_data["ascendant"]["sign"],
-              chart_data["ascendant"]["degree"], 1, False)]
-    for p in chart_data["planets"]:
-        rows.append((p["display_name"], p["abbr"], p["sign"], p["degree"], p["house"], p["retrograde"]))
-
-    for name, abbr, sign, degree, house, retro in rows:
-        label = f"{name} ({abbr})" + (" RETROGRADE" if retro else "")
-        c.drawString(col_x[0], y, label)
-        c.drawString(col_x[1], y, sign)
-        c.drawString(col_x[2], y, f"{degree:.1f}\u00b0")
-        c.drawString(col_x[3], y, f"House {house}")
-        y -= 0.2 * inch
-        if y < 0.75 * inch:
-            c.showPage()
-            y = page_h - 0.9 * inch
-            c.setFont("Times-Roman", 9)
-
-    # -- Page 4: Houses table --
-    c.showPage()
-    c.setFont("Times-Bold", 16)
-    c.drawString(0.75 * inch, page_h - 0.9 * inch, "Houses")
-    y = page_h - 1.5 * inch
-    col_x2 = [0.75 * inch, 2.05 * inch, 3.05 * inch, 5.3 * inch]
-    col_widths2 = [1.3 * inch, 1.0 * inch, 2.25 * inch, (page_w - 0.75 * inch) - 5.3 * inch]
-    headers2 = ["House", "Sign", "Planets in House", "Planets that aspect House"]
-
-    def wrap_cell_text(text, max_width, font_size, font="Times-Roman"):
-        """Word-wraps text to fit max_width, returns a list of lines."""
-        words = text.split(" ")
-        lines = []
-        line = ""
+    def _wrap(text, max_width, size, font="Times-Roman"):
+        words, lines, line = text.split(), [], ""
         for word in words:
             trial = (line + " " + word).strip()
-            if c.stringWidth(trial, font, font_size) > max_width and line:
+            if c.stringWidth(trial, font, size) > max_width and line:
                 lines.append(line)
                 line = word
             else:
@@ -815,41 +957,243 @@ def generate_full_chart_pdf(chart_data, chart_title="Your Vedic Birth Chart"):
             lines.append(line)
         return lines or [""]
 
-    c.setFont("Times-Bold", 9)
-    for cx, cw, h in zip(col_x2, col_widths2, headers2):
-        for i, ln in enumerate(wrap_cell_text(h, cw - 0.05 * inch, 9, "Times-Bold")):
-            c.drawString(cx, y - i * 0.14 * inch, ln)
-    y -= 0.4 * inch
-    row_font_size = 8
-    row_line_height = 0.16 * inch
-    c.setFont("Times-Roman", row_font_size)
+    # -- Page 3: House & Sign Key -- decodes the gold numbers in the diagram --
+    c.showPage()
+    c.setFont("Times-Bold", 16)
+    c.drawString(0.75 * inch, page_h - 0.9 * inch, "House & Sign Key")
+    c.setFont("Times-Roman", 9)
+    note = ("Every chart's Ascendant defines House 1 -- each sign listed below is simply "
+             "the next sign in zodiac order for each house that follows.")
+    ny = page_h - 1.15 * inch
+    for ln in _wrap(note, page_w - 1.5 * inch, 9):
+        c.drawString(0.75 * inch, ny, ln)
+        ny -= 0.16 * inch
 
+    y = ny - 0.25 * inch
+    c.setFont("Times-Bold", 10)
+    c.drawString(0.75 * inch, y, "House")
+    c.drawString(2.0 * inch, y, "Sign")
+    y -= 0.24 * inch
+    c.setFont("Times-Roman", 10)
     for house_data in chart_data["houses"]:
-        bodies_text = ", ".join(
-            f"{b['display_name']} ({b['abbr']}) {b['degree']:.1f}\u00b0" for b in house_data["bodies"]
-        ) or "None"
-        aspects_text = ", ".join(
-            f"{a['display_name']} ({a['abbr']}) {a['degree']:.1f}\u00b0" for a in house_data["aspects"]
-        ) or "None"
+        label = f"House {house_data['house']}"
+        if house_data["house"] == 1:
+            label += "  (Ascendant)"
+        c.drawString(0.75 * inch, y, label)
+        c.drawString(2.0 * inch, y, house_data["sign"])
+        y -= 0.24 * inch
 
-        body_lines = wrap_cell_text(bodies_text, col_widths2[2] - 0.1 * inch, row_font_size)
-        aspect_lines = wrap_cell_text(aspects_text, col_widths2[3] - 0.1 * inch, row_font_size)
-        n_lines = max(len(body_lines), len(aspect_lines), 1)
-        row_height = n_lines * row_line_height
+    # -- Page 3b: Vimshottari Dasha -- previous, current, and upcoming
+    # Mahadasha/Antardasha periods --
+    c.showPage()
+    c.setFont(CHART_FONT_BOLD, 16)
+    c.drawString(0.75 * inch, page_h - 0.9 * inch, "Vimshottari Dasha")
+    c.setFont(CHART_FONT_REGULAR, 9)
+    dasha_note = ("The Vimshottari Dasha system marks out major life periods (Mahadasha) and their "
+                   "sub-periods (Antardasha), based on the Moon's position at birth. Shown below: the "
+                   "period just before now, the one currently active, and the one coming up next.")
+    dy = page_h - 1.15 * inch
+    for ln in _wrap(dasha_note, page_w - 1.5 * inch, 9, font=CHART_FONT_REGULAR):
+        c.drawString(0.75 * inch, dy, ln)
+        dy -= 0.16 * inch
 
-        if y - row_height < 0.75 * inch:
+    y = dy - 0.3 * inch
+
+    def _describe_rules(house_list):
+        if not house_list:
+            return "rules no houses in this chart"
+        if len(house_list) == 1:
+            return f"rules House {house_list[0]}"
+        return "rules Houses " + ", ".join(str(h) for h in house_list)
+
+    for label, key in [("Previous", "previous"), ("Current", "current"), ("Upcoming", "next")]:
+        p = chart_data["dashas"].get(key)
+        heading = f"{label}: {p['mahadasha_display_name']} Mahadasha / {p['antardasha_display_name']} Antardasha" if p \
+            else f"{label}: (outside calculated range)"
+        dates = f"{p['start']} to {p['end']}" if p else ""
+
+        paragraph = ""
+        if p:
+            paragraph = (
+                f"{p['mahadasha_display_name']} is placed in House {p['mahadasha_house']} and "
+                f"{_describe_rules(p['mahadasha_rules_houses'])}. "
+                f"{p['antardasha_display_name']} is placed in House {p['antardasha_house']} and "
+                f"{_describe_rules(p['antardasha_rules_houses'])}. "
+                f"The two planets are in {p['angular_relationship']} to each other."
+            )
+        body_lines = _wrap(paragraph, page_w - 1.5 * inch, 9.5, font=CHART_FONT_REGULAR) if paragraph else []
+        block_height = 0.22 * inch + 0.18 * inch + len(body_lines) * 0.16 * inch + 0.2 * inch
+
+        if y - block_height < 0.75 * inch:
             c.showPage()
             y = page_h - 0.9 * inch
-            c.setFont("Times-Roman", row_font_size)
 
-        c.drawString(col_x2[0], y, f"House {house_data['house']}")
-        c.drawString(col_x2[1], y, house_data["sign"])
-        for i, ln in enumerate(body_lines):
-            c.drawString(col_x2[2], y - i * row_line_height, ln)
-        for i, ln in enumerate(aspect_lines):
-            c.drawString(col_x2[3], y - i * row_line_height, ln)
+        c.setFont(CHART_FONT_BOLD, 11)
+        c.setFillColorRGB(0.769, 0.659, 0.463) if key == "current" else c.setFillColorRGB(0, 0, 0)
+        c.drawString(0.75 * inch, y, heading)
+        c.setFillColorRGB(0, 0, 0)
+        y -= 0.2 * inch
+        if dates:
+            c.setFont(CHART_FONT_REGULAR, 9)
+            c.drawString(0.75 * inch, y, dates)
+            y -= 0.18 * inch
+        c.setFont(CHART_FONT_REGULAR, 9.5)
+        for ln in body_lines:
+            c.drawString(0.75 * inch, y, ln)
+            y -= 0.16 * inch
+        y -= 0.2 * inch
 
-        y -= row_height + 0.1 * inch
+    # -- Page 4: Placements -- Moon-first, narrative read-along format,
+    # matching the Houses section's style --
+    c.showPage()
+    c.setFont("Times-Bold", 16)
+    c.drawString(0.75 * inch, page_h - 0.9 * inch, "Placements")
+    c.setFont("Times-Roman", 9)
+    placements_intro = ("This section walks through each placement in order, starting with the Moon "
+                         "rather than the Sun, so you can follow along body by body.")
+    y = page_h - 1.15 * inch
+    for ln in _wrap(placements_intro, page_w - 1.5 * inch, 9):
+        c.drawString(0.75 * inch, y, ln)
+        y -= 0.16 * inch
+    y -= 0.15 * inch
+
+    placements_by_name = {"Ascendant": {"display_name": "Ascendant", "abbr": "As",
+                                          "sign": chart_data["ascendant"]["sign"],
+                                          "degree": chart_data["ascendant"]["degree"],
+                                          "house": 1, "retrograde": False}}
+    for p in chart_data["planets"]:
+        placements_by_name[p["name"]] = p
+
+    MOON_FIRST_ORDER = ["Ascendant", "Moon", "Sun", "Mercury", "Venus", "Mars",
+                        "Jupiter", "Saturn", "Rahu", "Ketu", "Uranus", "Neptune", "Pluto"]
+
+    for name in MOON_FIRST_ORDER:
+        p = placements_by_name.get(name)
+        if p is None:
+            continue
+        heading = f"{p['display_name']} ({p['abbr']})" + (" -- Retrograde" if p.get("retrograde") else "")
+        meaning = PLANET_MEANINGS.get(name, "")
+        paragraph = (f"{meaning} Placed in {p['sign']} at {p['degree']:.1f}\u00b0, in House {p['house']}.")
+
+        body_lines = _wrap(paragraph, page_w - 1.5 * inch, 9.5)
+        block_height = 0.22 * inch + len(body_lines) * 0.16 * inch + 0.18 * inch
+
+        if y - block_height < 0.75 * inch:
+            c.showPage()
+            y = page_h - 0.9 * inch
+
+        c.setFont("Times-Bold", 11)
+        c.drawString(0.75 * inch, y, heading)
+        y -= 0.22 * inch
+        c.setFont("Times-Roman", 9.5)
+        for ln in body_lines:
+            c.drawString(0.75 * inch, y, ln)
+            y -= 0.16 * inch
+        y -= 0.18 * inch
+
+    # -- Page 5: Houses -- narrative, read-along format, Braha-style compact meanings --
+    c.showPage()
+    c.setFont("Times-Bold", 16)
+    c.drawString(0.75 * inch, page_h - 0.9 * inch, "Houses")
+    c.setFont("Times-Roman", 9)
+    intro2 = ("This section walks through each house in order, so you can follow along house by "
+              "house rather than cross-referencing a grid -- it's meant to teach a more systematic, "
+              "repeatable way of reading a chart, not just hand you a lookup table. "
+              "Each house also lists which planets aspect it -- an aspect is when a planet, sitting "
+              "elsewhere in the chart, still casts its influence onto that house, in addition to "
+              "whatever planet is physically placed there.")
+    y = page_h - 1.15 * inch
+    for ln in _wrap(intro2, page_w - 1.5 * inch, 9):
+        c.drawString(0.75 * inch, y, ln)
+        y -= 0.16 * inch
+    y -= 0.15 * inch
+
+    for house_data in chart_data["houses"]:
+        h = house_data["house"]
+        heading = f"House {h} ({house_data['sign']}, ruled by {house_data['ruler_display_name']})"
+        bodies_text = ", ".join(
+            f"{b['display_name']} ({b['abbr']}) {b['degree']:.1f}\u00b0" for b in house_data["bodies"]
+        ) or "no placements"
+        aspects_text = ", ".join(
+            f"{a['display_name']} ({a['abbr']})" for a in house_data["aspects"]
+        ) or "none"
+        paragraph = (f"This house rules {HOUSE_MEANINGS.get(h, '')} "
+                     f"Placed here: {bodies_text}. Aspected by: {aspects_text}.")
+
+        body_lines = _wrap(paragraph, page_w - 1.5 * inch, 9.5)
+        block_height = 0.22 * inch + len(body_lines) * 0.16 * inch + 0.18 * inch
+
+        if y - block_height < 0.75 * inch:
+            c.showPage()
+            y = page_h - 0.9 * inch
+
+        c.setFont("Times-Bold", 11)
+        c.drawString(0.75 * inch, y, heading)
+        y -= 0.22 * inch
+        c.setFont("Times-Roman", 9.5)
+        for ln in body_lines:
+            c.drawString(0.75 * inch, y, ln)
+            y -= 0.16 * inch
+        y -= 0.18 * inch
+
+
+    # -- Page 5: Planetary Aspects (conjunction/sextile/square/trine/opposition) --
+    c.showPage()
+    c.setFont("Times-Bold", 16)
+    c.drawString(0.75 * inch, page_h - 0.9 * inch, "Planetary Aspects")
+
+    ASPECT_MEANINGS = [
+        ("Conjunction (0\u00b0)", "The two bodies sit at nearly the same degree -- "
+         "their energies blend together and intensify each other."),
+        ("Sextile (60\u00b0)", "An easy, supportive connection that offers "
+         "opportunity, though it usually takes a bit of effort to make use of."),
+        ("Square (90\u00b0)", "A tense, dynamic aspect that creates friction and "
+         "challenge -- often the pressure that pushes real growth."),
+        ("Trine (120\u00b0)", "A harmonious, flowing aspect where the two "
+         "energies support each other with ease."),
+        ("Opposition (180\u00b0)", "A polarizing aspect, pulling two areas in "
+         "opposite directions and calling for balance between them."),
+    ]
+
+    key_y = page_h - 1.25 * inch
+    line_gap = 0.24 * inch
+    for i, (label, meaning) in enumerate(ASPECT_MEANINGS):
+        c.setFont("Times-Bold", 10)
+        c.drawString(0.75 * inch, key_y - i * line_gap, label)
+        c.setFont("Times-Roman", 9)
+        wrapped = _wrap(meaning, page_w - 3.0 * inch, 9)
+        c.drawString(2.3 * inch, key_y - i * line_gap, wrapped[0])
+        if len(wrapped) > 1:
+            # rare, only if a meaning is unusually long -- keep it simple
+            # by continuing directly beneath rather than reflowing the grid
+            c.drawString(2.3 * inch, key_y - i * line_gap - 0.14 * inch, wrapped[1])
+
+    y = key_y - len(ASPECT_MEANINGS) * line_gap - 0.3 * inch
+    c.setFont("Times-Roman", 9)
+    c.drawString(0.75 * inch, y, f"Orb used: aspects within {ASPECT_ANGLE_ORB:.0f}\u00b0 of exact are shown below.")
+    y -= 0.35 * inch
+
+    col_x3 = [0.75 * inch, 2.6 * inch, 4.45 * inch, 5.7 * inch]
+    headers3 = ["Body 1", "Body 2", "Aspect", "Orb"]
+    c.setFont("Times-Bold", 9)
+    for cx, h in zip(col_x3, headers3):
+        c.drawString(cx, y, h)
+    y -= 0.22 * inch
+    c.setFont("Times-Roman", 8)
+
+    if not chart_data["planetary_aspects"]:
+        c.drawString(0.75 * inch, y, "No planetary aspects fall within orb for this chart.")
+    else:
+        for a in chart_data["planetary_aspects"]:
+            if y < 0.75 * inch:
+                c.showPage()
+                y = page_h - 0.9 * inch
+                c.setFont("Times-Roman", 8)
+            c.drawString(col_x3[0], y, f"{a['body1']} ({a['abbr1']})")
+            c.drawString(col_x3[1], y, f"{a['body2']} ({a['abbr2']})")
+            c.drawString(col_x3[2], y, a['aspect'])
+            c.drawString(col_x3[3], y, f"{a['orb']:.2f}\u00b0")
+            y -= 0.18 * inch
 
     c.save()
     buf.seek(0)
