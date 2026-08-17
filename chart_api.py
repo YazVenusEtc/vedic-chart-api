@@ -508,11 +508,43 @@ def wrap_line_to_width(text, max_width, font_size, avg_char_ratio=0.56):
     return lines
 
 
+def wrap_colored_items(items, max_width, font_size, avg_char_ratio=0.56):
+    """Like wrap_line_to_width, but for a list of (label, color) tuples --
+    e.g. several differently-colored planets that need to share a line
+    when there's room. Returns a list of lines, each line itself a list
+    of (label, color) tuples that belong on it together."""
+    lines = []
+    current = []
+    current_width = 0.0
+    sep_width = estimate_text_width(", ", font_size, avg_char_ratio)
+    for label, color in items:
+        item_width = estimate_text_width(label, font_size, avg_char_ratio)
+        added_width = (sep_width if current else 0) + item_width
+        if current and (current_width + added_width) > max_width:
+            lines.append(current)
+            current = [(label, color)]
+            current_width = item_width
+        else:
+            current.append((label, color))
+            current_width += added_width
+    if current:
+        lines.append(current)
+    return lines
+
+
+def colored_line_width(line_items, font_size, avg_char_ratio=0.56):
+    """Total rendered width of a wrapped line built by wrap_colored_items."""
+    sep_width = estimate_text_width(", ", font_size, avg_char_ratio)
+    total = sum(estimate_text_width(label, font_size, avg_char_ratio) for label, _ in line_items)
+    total += sep_width * max(len(line_items) - 1, 0)
+    return total
+
+
 PLANET_COLORS = {
-    "Sun": "#B8860B", "Moon": "#4A4A4A", "Mercury": "#2F6F5E",
-    "Venus": "#8B3A5C", "Mars": "#8B2E2E", "Jupiter": "#3B4A8B",
-    "Saturn": "#4A3B6B", "Rahu": "#6B4A8B", "Ketu": "#2F6F6F",
-    "Ascendant": "#1A1A1A", "Uranus": "#5C7A7A", "Neptune": "#5C7A9A", "Pluto": "#6B5C4A",
+    "Mars": "#A63030", "Sun": "#8F5614", "Rahu": "#6F6220", "Mercury": "#26734D",
+    "Ketu": "#206F6C", "Uranus": "#276D86", "Moon": "#54667D", "Saturn": "#2E366B",
+    "Neptune": "#6651B8", "Jupiter": "#79469B", "Venus": "#A63A7F", "Pluto": "#822B3D",
+    "Ascendant": "#1A1A1A",
 }
 CHART_LINE_COLOR = "#C4A876"   # muted gold/tan
 CHART_NUMBER_COLOR = "#C4A876"  # same tone, slightly different weight in use
@@ -520,19 +552,27 @@ CHART_NUMBER_COLOR = "#C4A876"  # same tone, slightly different weight in use
 
 def _house_text_content(chart_data):
     """Shared between the SVG and PDF chart drawers: for every house,
-    returns (house_num, list of (abbr, color) for each resident body).
-    No sign name, no degrees, no aspects -- the diagram itself only shows
-    which bodies sit in which house; a separate Key/table covers the rest."""
+    returns (sign_number, list of (label, color) for each resident body,
+    each label including that body's exact degree). sign_number is the
+    body's fixed position in the zodiac (1=Aries...12=Pisces) -- not the
+    house number relative to the Ascendant -- so it reads the same way
+    for everyone; a universal Key (not a chart-specific one) explains it."""
+    asc_sign = chart_data["ascendant"]["sign"]
+    asc_index = SIGNS.index(asc_sign)
+    house_sign = {h: SIGNS[(asc_index + h - 1) % 12] for h in range(1, 13)}
+
     by_house = {h: [] for h in range(1, 13)}
-    by_house[1].append(("As", PLANET_COLORS["Ascendant"]))
+    by_house[1].append((f"As {chart_data['ascendant']['degree']:.1f}\u00b0", PLANET_COLORS["Ascendant"]))
     for p in chart_data["planets"]:
         abbr = PLANET_ABBR.get(p["name"], p["name"])
         color = PLANET_COLORS.get(p["name"], "#333333")
-        by_house[p["house"]].append((abbr, color))
+        label = f"{abbr} {p['degree']:.1f}\u00b0"
+        by_house[p["house"]].append((label, color))
 
     content = {}
     for house_num in range(1, 13):
-        content[house_num] = by_house[house_num]
+        sign_number = SIGNS.index(house_sign[house_num]) + 1
+        content[house_num] = (sign_number, by_house[house_num])
     return content
 
 
@@ -565,9 +605,60 @@ def generate_north_indian_chart_svg(chart_data, canvas_width=1200, canvas_height
     glow_r = min(width, height) * 0.16
     svg_lines.append(f'<circle cx="{center_x}" cy="{center_y}" r="{glow_r}" fill="url(#vbcCenterGlow)"/>')
 
-    NUMBER_FONT = max(int(min(width, height) * 0.028), 14)
-    BODY_FONT = max(int(min(width, height) * 0.034), 16)
-    line_height = BODY_FONT * 1.25
+    NUMBER_FONT_RATIO = 0.75  # sign number renders a bit smaller than the body text
+    CONTENT_CANDIDATES = [40, 36, 32, 28, 26, 24, 22, 20, 18, 16, 14, 12, 10, 8]
+
+    per_house_geometry = {}
+    for house_num, pts in houses.items():
+        bbox = polygon_bbox(pts)
+        bbox_w, bbox_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        wrap_width = bbox_w * 0.80
+        safe_height = bbox_h * 0.72
+        per_house_geometry[house_num] = (wrap_width, safe_height, polygon_centroid(pts))
+
+    def fits_canvas(centroid_x, text, font_size):
+        half = estimate_text_width(text, font_size) / 2.0
+        return (centroid_x - half) >= margin_x * 0.4 and (centroid_x + half) <= (canvas_width - margin_x * 0.4)
+
+    def layout_fits(body_font):
+        number_font = max(int(body_font * NUMBER_FONT_RATIO), 8)
+        number_line_height = number_font * 1.2
+        body_line_height = body_font * 1.25
+        layout = {}
+        for house_num, pts in houses.items():
+            wrap_width, safe_height, centroid = per_house_geometry[house_num]
+            sign_number, bodies = content[house_num]
+            number_text = str(sign_number)
+
+            if not fits_canvas(centroid[0], number_text, number_font):
+                return None
+
+            wrapped_lines = wrap_colored_items(bodies, wrap_width, body_font) if bodies else []
+            for line_items in wrapped_lines:
+                combined = ", ".join(lbl for lbl, _ in line_items)
+                if not fits_canvas(centroid[0], combined, body_font):
+                    return None
+
+            total_height = number_line_height + (0.3 * body_line_height if wrapped_lines else 0) \
+                + len(wrapped_lines) * body_line_height
+            if total_height > safe_height:
+                return None
+
+            layout[house_num] = (number_text, wrapped_lines)
+        return layout, number_font, body_font
+
+    result = None
+    for candidate in CONTENT_CANDIDATES:
+        result = layout_fits(candidate)
+        if result is not None:
+            break
+    if result is None:
+        smallest = CONTENT_CANDIDATES[-1]
+        layout = {h: (str(content[h][0]), [[item] for item in content[h][1]]) for h in range(1, 13)}
+        result = (layout, max(int(smallest * NUMBER_FONT_RATIO), 8), smallest)
+    layout, number_font, body_font = result
+    number_line_height = number_font * 1.2
+    body_line_height = body_font * 1.25
 
     for house_num, pts in houses.items():
         points_str = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
@@ -576,33 +667,39 @@ def generate_north_indian_chart_svg(chart_data, canvas_width=1200, canvas_height
             f'stroke="{CHART_LINE_COLOR}" stroke-width="1.3"/>'
         )
 
-        centroid = polygon_centroid(pts)
-        bbox = polygon_bbox(pts)
+        _, _, centroid = per_house_geometry[house_num]
+        number_text, wrapped_lines = layout[house_num]
 
-        # Number sits offset toward this house's own outer corner (away
-        # from the chart's center), out of the way of the stacked bodies.
-        dx, dy = centroid[0] - center_x, centroid[1] - center_y
-        dist = max((dx ** 2 + dy ** 2) ** 0.5, 1)
-        ux, uy = dx / dist, dy / dist
-        offset = min(bbox[2] - bbox[0], bbox[3] - bbox[1]) * 0.34
-        num_x, num_y = centroid[0] + ux * offset, centroid[1] + uy * offset
+        cursor = 0.0
+        number_local_y = cursor + number_line_height * 0.8
+        cursor += number_line_height
+        if wrapped_lines:
+            cursor += 0.3 * body_line_height
+        line_positions = []
+        for line_items in wrapped_lines:
+            line_positions.append((line_items, cursor + body_line_height * 0.8))
+            cursor += body_line_height
+
+        top_y = centroid[1] - cursor / 2.0
 
         svg_lines.append(
-            f'<text x="{num_x:.1f}" y="{num_y:.1f}" font-size="{NUMBER_FONT}" '
+            f'<text x="{centroid[0]:.1f}" y="{top_y + number_local_y:.1f}" font-size="{number_font}" '
             f'text-anchor="middle" fill="{CHART_NUMBER_COLOR}" '
-            f'font-family="Fraunces, serif">{house_num}</text>'
+            f'font-family="Fraunces, serif">{number_text}</text>'
         )
 
-        bodies = content[house_num]
-        if bodies:
-            total_h = len(bodies) * line_height
-            top_y = centroid[1] - total_h / 2 + line_height * 0.75
-            for i, (abbr, color) in enumerate(bodies):
-                svg_lines.append(
-                    f'<text x="{centroid[0]:.1f}" y="{top_y + i * line_height:.1f}" '
-                    f'font-size="{BODY_FONT}" text-anchor="middle" fill="{color}" '
-                    f'font-family="Fraunces, serif">{abbr}</text>'
-                )
+        for line_items, local_y in line_positions:
+            line_width = colored_line_width(line_items, body_font)
+            start_x = centroid[0] - line_width / 2.0
+            tspans = []
+            cx = start_x
+            for i, (label, color) in enumerate(line_items):
+                prefix = ", " if i > 0 else ""
+                tspans.append(f'<tspan fill="{color}">{prefix}{label}</tspan>')
+            svg_lines.append(
+                f'<text x="{start_x:.1f}" y="{top_y + local_y:.1f}" font-size="{body_font}" '
+                f'text-anchor="start" font-family="Fraunces, serif">{"".join(tspans)}</text>'
+            )
 
     # Round the outer 4 corners: mask each sharp point with a white square
     # positioned to extend inward from that corner, then draw a proper
@@ -653,9 +750,82 @@ def draw_chart_on_pdf_canvas(c, chart_data, x0, y0, width, height):
         c.circle(glow_pdf_center[0], glow_pdf_center[1], glow_r * frac, stroke=0, fill=1)
         c.restoreState()
 
-    NUMBER_FONT = max(int(min(width, height) * 0.034), 9)
-    BODY_FONT = max(int(min(width, height) * 0.040), 10)
-    line_height = BODY_FONT * 1.25
+    NUMBER_FONT_RATIO = 0.75
+    CONTENT_CANDIDATES = [40, 36, 32, 28, 26, 24, 22, 20, 18, 16, 14, 13, 12, 11, 10, 9, 8, 7, 6]
+
+    per_house_geometry = {}
+    for house_num, pts in houses.items():
+        bbox = polygon_bbox(pts)
+        bbox_w, bbox_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        wrap_width = bbox_w * 0.80
+        safe_height = bbox_h * 0.72
+        per_house_geometry[house_num] = (wrap_width, safe_height, to_pdf_point(polygon_centroid(pts)))
+
+    def fits_canvas_pdf(centroid_x, text, font, size):
+        half = c.stringWidth(text, font, size) / 2.0
+        buffer = width * 0.015
+        return (centroid_x - half) >= (x0 + buffer) and (centroid_x + half) <= (x0 + width - buffer)
+
+    def wrap_colored_pdf(items, max_width, font, size):
+        lines, current, current_width = [], [], 0.0
+        sep_width = c.stringWidth(", ", font, size)
+        for label, color in items:
+            item_width = c.stringWidth(label, font, size)
+            added = (sep_width if current else 0) + item_width
+            if current and (current_width + added) > max_width:
+                lines.append(current)
+                current, current_width = [(label, color)], item_width
+            else:
+                current.append((label, color))
+                current_width += added
+        if current:
+            lines.append(current)
+        return lines
+
+    def colored_line_width_pdf(line_items, font, size):
+        sep_width = c.stringWidth(", ", font, size)
+        total = sum(c.stringWidth(lbl, font, size) for lbl, _ in line_items)
+        return total + sep_width * max(len(line_items) - 1, 0)
+
+    def layout_fits(body_font):
+        number_font = max(int(body_font * NUMBER_FONT_RATIO), 6)
+        number_line_height = number_font * 1.2
+        body_line_height = body_font * 1.25
+        layout = {}
+        for house_num, pts in houses.items():
+            wrap_width, safe_height, centroid = per_house_geometry[house_num]
+            sign_number, bodies = content[house_num]
+            number_text = str(sign_number)
+
+            if not fits_canvas_pdf(centroid[0], number_text, CHART_FONT_REGULAR, number_font):
+                return None
+
+            wrapped_lines = wrap_colored_pdf(bodies, wrap_width, CHART_FONT_REGULAR, body_font) if bodies else []
+            for line_items in wrapped_lines:
+                combined = ", ".join(lbl for lbl, _ in line_items)
+                if not fits_canvas_pdf(centroid[0], combined, CHART_FONT_REGULAR, body_font):
+                    return None
+
+            total_height = number_line_height + (0.3 * body_line_height if wrapped_lines else 0) \
+                + len(wrapped_lines) * body_line_height
+            if total_height > safe_height:
+                return None
+
+            layout[house_num] = (number_text, wrapped_lines)
+        return layout, number_font, body_font
+
+    result = None
+    for candidate in CONTENT_CANDIDATES:
+        result = layout_fits(candidate)
+        if result is not None:
+            break
+    if result is None:
+        smallest = CONTENT_CANDIDATES[-1]
+        layout = {h: (str(content[h][0]), [[item] for item in content[h][1]]) for h in range(1, 13)}
+        result = (layout, max(int(smallest * NUMBER_FONT_RATIO), 6), smallest)
+    layout, number_font, body_font = result
+    number_line_height = number_font * 1.2
+    body_line_height = body_font * 1.25
 
     c.setLineWidth(1.0)
     c.setStrokeColorRGB(0.769, 0.659, 0.463)  # #C4A876 muted gold
@@ -668,31 +838,38 @@ def draw_chart_on_pdf_canvas(c, chart_data, x0, y0, width, height):
         path.close()
         c.drawPath(path, stroke=1, fill=0)
 
-        centroid_td = polygon_centroid(pts)
-        bbox = polygon_bbox(pts)
-        dx, dy = centroid_td[0] - center_x, centroid_td[1] - center_y
-        dist = max((dx ** 2 + dy ** 2) ** 0.5, 1)
-        ux, uy = dx / dist, dy / dist
-        offset = min(bbox[2] - bbox[0], bbox[3] - bbox[1]) * 0.34
-        num_td = (centroid_td[0] + ux * offset, centroid_td[1] + uy * offset)
-        num_pdf = to_pdf_point(num_td)
+        _, _, centroid_pdf = per_house_geometry[house_num]
+        number_text, wrapped_lines = layout[house_num]
 
-        c.setFont(CHART_FONT_REGULAR, NUMBER_FONT)
+        cursor = 0.0
+        number_local_y = cursor + number_line_height * 0.8
+        cursor += number_line_height
+        if wrapped_lines:
+            cursor += 0.3 * body_line_height
+        line_positions = []
+        for line_items in wrapped_lines:
+            line_positions.append((line_items, cursor + body_line_height * 0.8))
+            cursor += body_line_height
+
+        top_y = centroid_pdf[1] + cursor / 2.0
+
+        c.setFont(CHART_FONT_REGULAR, number_font)
         c.setFillColorRGB(0.769, 0.659, 0.463)
-        c.drawCentredString(num_pdf[0], num_pdf[1] - NUMBER_FONT * 0.35, str(house_num))
+        c.drawCentredString(centroid_pdf[0], top_y - number_local_y, number_text)
 
-        centroid_pdf = to_pdf_point(centroid_td)
-        bodies = content[house_num]
-        if bodies:
-            total_h = len(bodies) * line_height
-            top_y = centroid_pdf[1] + total_h / 2 - line_height * 0.75
-            c.setFont(CHART_FONT_REGULAR, BODY_FONT)
-            for i, (abbr, color_hex) in enumerate(bodies):
+        c.setFont(CHART_FONT_REGULAR, body_font)
+        for line_items, local_y in line_positions:
+            y = top_y - local_y
+            line_width = colored_line_width_pdf(line_items, CHART_FONT_REGULAR, body_font)
+            cx = centroid_pdf[0] - line_width / 2.0
+            for i, (label, color_hex) in enumerate(line_items):
+                text = (", " if i > 0 else "") + label
                 r = int(color_hex[1:3], 16) / 255
                 g = int(color_hex[3:5], 16) / 255
                 b = int(color_hex[5:7], 16) / 255
                 c.setFillColorRGB(r, g, b)
-                c.drawCentredString(centroid_pdf[0], top_y - i * line_height, abbr)
+                c.drawString(cx, y, text)
+                cx += c.stringWidth(text, CHART_FONT_REGULAR, body_font)
     c.setFillColorRGB(0, 0, 0)
 
     # Round the outer 4 corners specifically: mask each sharp point with a
@@ -785,18 +962,18 @@ INTRO_SECTIONS = [
 
 
 PLANET_MEANINGS = {
-    "Moon": "the mind, emotions, and instinctive reactions. how you feel and process life day to day.",
-    "Sun": "the core self, willpower, and vitality. how you shine and lead.",
-    "Mercury": "communication, intellect, and reasoning. how you think and express ideas.",
-    "Venus": "love, beauty, and pleasure. what you're drawn to and how you relate to others.",
-    "Mars": "drive, courage, and assertion. how you act and pursue what you want.",
-    "Jupiter": "growth, wisdom, and fortune. where life expands and offers meaning.",
-    "Saturn": "discipline, limitation, and time. where you mature through effort and restriction.",
-    "Rahu": "worldly desire and forward momentum. what you're pulled toward growing into.",
-    "Ketu": "detachment and past mastery. what comes naturally but calls for release.",
-    "Uranus": "sudden change, originality, and rebellion. where you break from convention.",
-    "Neptune": "imagination, spirituality, and illusion. where boundaries dissolve.",
-    "Pluto": "deep transformation, power, and rebirth. here old structures break down and remake themselves.",
+    "Moon": "the mind, emotions, and instinctive reactions -- how you feel and process life day to day.",
+    "Sun": "the core self, willpower, and vitality -- how you shine and lead.",
+    "Mercury": "communication, intellect, and reasoning -- how you think and express ideas.",
+    "Venus": "love, beauty, and pleasure -- what you're drawn to and how you relate to others.",
+    "Mars": "drive, courage, and assertion -- how you act and pursue what you want.",
+    "Jupiter": "growth, wisdom, and fortune -- where life expands and offers meaning.",
+    "Saturn": "discipline, limitation, and time -- where you mature through effort and restriction.",
+    "Rahu": "worldly desire and forward momentum -- what you're pulled toward growing into.",
+    "Ketu": "detachment and past mastery -- what comes naturally but calls for release.",
+    "Uranus": "sudden change, originality, and rebellion -- where you break from convention.",
+    "Neptune": "imagination, spirituality, and illusion -- where boundaries dissolve.",
+    "Pluto": "deep transformation, power, and rebirth -- where old structures break down and remake themselves.",
     "Ascendant": "the outer personality and how you meet the world -- the lens the whole chart is read through.",
 }
 
@@ -895,8 +1072,10 @@ def generate_full_chart_pdf(chart_data, chart_title="Your Vedic Birth Chart"):
     c.setFillColorRGB(0.769, 0.659, 0.463)
     c.drawString(0.75 * inch, page_h - 1.4 * inch, "\u25cf")
     c.setFillColorRGB(0, 0, 0)
-    intro_note = ("The small gold number in each section is that house's number (1-12). "
-                   "See the table below for which sign each house number corresponds to in this chart.")
+    intro_note = ("The small gold number in each section marks that sign's fixed position in the "
+                   "zodiac -- 1 is Aries, 2 is Taurus, and so on through 12 (Pisces). This is the same "
+                   "for every chart. See the Zodiac Key below to decode the numbers, and the table "
+                   "further down for which house each sign occupies specifically in this chart.")
 
     def _wrap_simple(text, max_width, size):
         words, lines, line = text.split(), [], ""
@@ -938,6 +1117,19 @@ def generate_full_chart_pdf(chart_data, chart_title="Your Vedic Birth Chart"):
         c.setFont("Times-Roman", 9)
         c.drawString(x + 0.32 * inch, y, name)
 
+    zodiac_key_y = legend_y0 - 5 * 0.22 * inch - 0.2 * inch
+    c.setFont("Times-Bold", 10)
+    c.setFillColorRGB(0, 0, 0)
+    c.drawString(0.75 * inch, zodiac_key_y, "Zodiac Key")
+    zk_y = zodiac_key_y - 0.2 * inch
+    # 6 signs per row, 2 rows
+    zk_col_positions = [0.75 * inch + j * ((page_w - 1.5 * inch) / 6) for j in range(6)]
+    for i, sign in enumerate(SIGNS):
+        row = i // 6
+        col = i % 6
+        c.setFont("Times-Roman", 9)
+        c.drawString(zk_col_positions[col], zk_y - row * 0.2 * inch, f"{i + 1} = {sign}")
+
     chart_width = 7.5 * inch
     chart_height = 5.0 * inch
     chart_x0 = (page_w - chart_width) / 2
@@ -963,7 +1155,8 @@ def generate_full_chart_pdf(chart_data, chart_title="Your Vedic Birth Chart"):
     c.drawString(0.75 * inch, page_h - 0.9 * inch, "House & Sign Key")
     c.setFont("Times-Roman", 9)
     note = ("Every chart's Ascendant defines House 1 -- each sign listed below is simply "
-             "the next sign in zodiac order for each house that follows.")
+             "the next sign in zodiac order for each house that follows. \"Sign #\" is the same "
+             "number shown in gold on the diagram for that sign.")
     ny = page_h - 1.15 * inch
     for ln in _wrap(note, page_w - 1.5 * inch, 9):
         c.drawString(0.75 * inch, ny, ln)
@@ -973,6 +1166,7 @@ def generate_full_chart_pdf(chart_data, chart_title="Your Vedic Birth Chart"):
     c.setFont("Times-Bold", 10)
     c.drawString(0.75 * inch, y, "House")
     c.drawString(2.0 * inch, y, "Sign")
+    c.drawString(3.5 * inch, y, "Sign #")
     y -= 0.24 * inch
     c.setFont("Times-Roman", 10)
     for house_data in chart_data["houses"]:
@@ -981,6 +1175,7 @@ def generate_full_chart_pdf(chart_data, chart_title="Your Vedic Birth Chart"):
             label += "  (Ascendant)"
         c.drawString(0.75 * inch, y, label)
         c.drawString(2.0 * inch, y, house_data["sign"])
+        c.drawString(3.5 * inch, y, str(SIGNS.index(house_data["sign"]) + 1))
         y -= 0.24 * inch
 
     # -- Page 3b: Vimshottari Dasha -- previous, current, and upcoming
