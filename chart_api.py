@@ -785,18 +785,18 @@ INTRO_SECTIONS = [
 
 
 PLANET_MEANINGS = {
-    "Moon": "the mind, emotions, and instinctive reactions -- how you feel and process life day to day.",
-    "Sun": "the core self, willpower, and vitality -- how you shine and lead.",
-    "Mercury": "communication, intellect, and reasoning -- how you think and express ideas.",
-    "Venus": "love, beauty, and pleasure -- what you're drawn to and how you relate to others.",
-    "Mars": "drive, courage, and assertion -- how you act and pursue what you want.",
-    "Jupiter": "growth, wisdom, and fortune -- where life expands and offers meaning.",
-    "Saturn": "discipline, limitation, and time -- where you mature through effort and restriction.",
-    "Rahu": "worldly desire and forward momentum -- what you're pulled toward growing into.",
-    "Ketu": "detachment and past mastery -- what comes naturally but calls for release.",
-    "Uranus": "sudden change, originality, and rebellion -- where you break from convention.",
-    "Neptune": "imagination, spirituality, and illusion -- where boundaries dissolve.",
-    "Pluto": "deep transformation, power, and rebirth -- where old structures break down and remake themselves.",
+    "Moon": "the mind, emotions, and instinctive reactions. how you feel and process life day to day.",
+    "Sun": "the core self, willpower, and vitality. how you shine and lead.",
+    "Mercury": "communication, intellect, and reasoning. how you think and express ideas.",
+    "Venus": "love, beauty, and pleasure. what you're drawn to and how you relate to others.",
+    "Mars": "drive, courage, and assertion. how you act and pursue what you want.",
+    "Jupiter": "growth, wisdom, and fortune. where life expands and offers meaning.",
+    "Saturn": "discipline, limitation, and time. where you mature through effort and restriction.",
+    "Rahu": "worldly desire and forward momentum. what you're pulled toward growing into.",
+    "Ketu": "detachment and past mastery. what comes naturally but calls for release.",
+    "Uranus": "sudden change, originality, and rebellion. where you break from convention.",
+    "Neptune": "imagination, spirituality, and illusion. where boundaries dissolve.",
+    "Pluto": "deep transformation, power, and rebirth. here old structures break down and remake themselves.",
     "Ascendant": "the outer personality and how you meet the world -- the lens the whole chart is read through.",
 }
 
