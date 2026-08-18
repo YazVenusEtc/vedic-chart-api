@@ -39,20 +39,20 @@ from flask import Flask, request, jsonify, Response
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
-# The chart diagram itself (house numbers, planet abbreviations) uses Lora
-# -- a warmer, more elegant serif than reportlab's built-in Times family --
-# specifically for that diagram. Registration is wrapped in a try/except
-# so a missing font file degrades gracefully to Times rather than crashing
-# the whole app (e.g. if the fonts/ folder wasn't deployed alongside this
-# file for some reason).
+# The chart diagram itself (house numbers, planet abbreviations) uses
+# Poppins -- a relaxed, friendly geometric sans-serif, distinct from the
+# rest of the document's more formal Times family. Registration is
+# wrapped in a try/except so a missing font file degrades gracefully to
+# Times rather than crashing the whole app (e.g. if the fonts/ folder
+# wasn't deployed alongside this file for some reason).
 _FONTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
 CHART_FONT_REGULAR = "Times-Roman"
 CHART_FONT_BOLD = "Times-Bold"
 try:
-    pdfmetrics.registerFont(TTFont("Lora", os.path.join(_FONTS_DIR, "Lora-Regular.ttf")))
-    pdfmetrics.registerFont(TTFont("Lora-Bold", os.path.join(_FONTS_DIR, "Lora-Bold.ttf")))
-    CHART_FONT_REGULAR = "Lora"
-    CHART_FONT_BOLD = "Lora-Bold"
+    pdfmetrics.registerFont(TTFont("Poppins", os.path.join(_FONTS_DIR, "Poppins-Regular.ttf")))
+    pdfmetrics.registerFont(TTFont("Poppins-Bold", os.path.join(_FONTS_DIR, "Poppins-Bold.ttf")))
+    CHART_FONT_REGULAR = "Poppins"
+    CHART_FONT_BOLD = "Poppins-Bold"
 except Exception:
     pass
 
@@ -599,7 +599,7 @@ def generate_north_indian_chart_svg(chart_data, canvas_width=1200, canvas_height
         f'<rect x="0" y="0" width="{canvas_width}" height="{canvas_height}" fill="white"/>',
         f'<text x="{canvas_width/2}" y="{margin_y * 0.5}" text-anchor="middle" '
         f'font-family="sans-serif" font-size="15" letter-spacing="3" fill="#9C9488">'
-        f'NORTH INDIAN &#183; WHOLE SIGN HOUSES</text>',
+        f'WHOLE SIGN HOUSES</text>',
     ]
 
     glow_r = min(width, height) * 0.16
@@ -685,7 +685,7 @@ def generate_north_indian_chart_svg(chart_data, canvas_width=1200, canvas_height
         svg_lines.append(
             f'<text x="{centroid[0]:.1f}" y="{top_y + number_local_y:.1f}" font-size="{number_font}" '
             f'text-anchor="middle" fill="{CHART_NUMBER_COLOR}" '
-            f'font-family="Fraunces, serif">{number_text}</text>'
+            f'font-family="Poppins, sans-serif">{number_text}</text>'
         )
 
         for line_items, local_y in line_positions:
@@ -698,29 +698,8 @@ def generate_north_indian_chart_svg(chart_data, canvas_width=1200, canvas_height
                 tspans.append(f'<tspan fill="{color}">{prefix}{label}</tspan>')
             svg_lines.append(
                 f'<text x="{start_x:.1f}" y="{top_y + local_y:.1f}" font-size="{body_font}" '
-                f'text-anchor="start" font-family="Fraunces, serif">{"".join(tspans)}</text>'
+                f'text-anchor="start" font-family="Poppins, sans-serif">{"".join(tspans)}</text>'
             )
-
-    # Round the outer 4 corners: mask each sharp point with a white square
-    # positioned to extend inward from that corner, then draw a proper
-    # rounded rectangle outline on top as the clean visual border. (SVG's
-    # own coordinate space doesn't flip like PDF's does, so the inward
-    # directions here are the straightforward top-down ones.)
-    corner_r = min(width, height) * 0.035
-    mask_size = corner_r * 2.2
-    corners = [(x0, y0), (x0 + width, y0), (x0 + width, y0 + height), (x0, y0 + height)]
-    inward = [(1, 1), (-1, 1), (-1, -1), (1, -1)]
-    for (cx, cy), (ix, iy) in zip(corners, inward):
-        rect_x = cx if ix > 0 else cx - mask_size
-        rect_y = cy if iy > 0 else cy - mask_size
-        svg_lines.append(f'<rect x="{rect_x:.1f}" y="{rect_y:.1f}" width="{mask_size:.1f}" '
-                          f'height="{mask_size:.1f}" fill="white"/>')
-
-    svg_lines.append(
-        f'<rect x="{x0:.1f}" y="{y0:.1f}" width="{width:.1f}" height="{height:.1f}" '
-        f'rx="{corner_r:.1f}" ry="{corner_r:.1f}" fill="none" '
-        f'stroke="{CHART_LINE_COLOR}" stroke-width="1.4"/>'
-    )
 
     svg_lines.append('</svg>')
     return "\n".join(svg_lines)
@@ -871,33 +850,6 @@ def draw_chart_on_pdf_canvas(c, chart_data, x0, y0, width, height):
                 c.drawString(cx, y, text)
                 cx += c.stringWidth(text, CHART_FONT_REGULAR, body_font)
     c.setFillColorRGB(0, 0, 0)
-
-    # Round the outer 4 corners specifically: mask each sharp point with a
-    # white square (sized and positioned to cover just that corner,
-    # offset inward so it doesn't touch the house numbers/bodies), then
-    # stroke a proper rounded rectangle on top as the clean visual border.
-    corner_r = min(width, height) * 0.035
-    mask_size = corner_r * 2.2
-    corners_td = [(x0, y0), (x0 + width, y0), (x0 + width, y0 + height), (x0, y0 + height)]
-    # Inward direction for each corner, in PDF's own coordinate space (not
-    # top-down space -- the y-axis flips between the two, so these are
-    # deliberately different from a naive top-down inward guess).
-    inward = [(1, -1), (-1, -1), (-1, 1), (1, 1)]
-    c.setFillColorRGB(1, 1, 1)
-    for (cx_td, cy_td), (ix, iy) in zip(corners_td, inward):
-        cx, cy = to_pdf_point((cx_td, cy_td))
-        rect_x = cx if ix > 0 else cx - mask_size
-        rect_y = cy if iy > 0 else cy - mask_size
-        c.rect(rect_x, rect_y, mask_size, mask_size, stroke=0, fill=1)
-
-    c.setStrokeColorRGB(0.769, 0.659, 0.463)
-    c.setLineWidth(1.3)
-    outer_pdf = [to_pdf_point(p) for p in corners_td]
-    rr_x = min(p[0] for p in outer_pdf)
-    rr_y = min(p[1] for p in outer_pdf)
-    rr_w = max(p[0] for p in outer_pdf) - rr_x
-    rr_h = max(p[1] for p in outer_pdf) - rr_y
-    c.roundRect(rr_x, rr_y, rr_w, rr_h, corner_r, stroke=1, fill=0)
 
 
 def draw_mini_house_diagram(c, pdf_x0, pdf_y0, size):
@@ -1244,8 +1196,7 @@ def generate_full_chart_pdf(chart_data, chart_title="Your Vedic Birth Chart"):
     c.setFont("Times-Bold", 16)
     c.drawString(0.75 * inch, page_h - 0.9 * inch, "Placements")
     c.setFont("Times-Roman", 9)
-    placements_intro = ("This section walks through each placement in order, starting with the Moon "
-                         "rather than the Sun, so you can follow along body by body.")
+    placements_intro = ("This section walks through each placement in order.")
     y = page_h - 1.15 * inch
     for ln in _wrap(placements_intro, page_w - 1.5 * inch, 9):
         c.drawString(0.75 * inch, y, ln)
@@ -1292,9 +1243,8 @@ def generate_full_chart_pdf(chart_data, chart_title="Your Vedic Birth Chart"):
     c.drawString(0.75 * inch, page_h - 0.9 * inch, "Houses")
     c.setFont("Times-Roman", 9)
     intro2 = ("This section walks through each house in order, so you can follow along house by "
-              "house rather than cross-referencing a grid -- it's meant to teach a more systematic, "
-              "repeatable way of reading a chart, not just hand you a lookup table. "
-              "Each house also lists which planets aspect it -- an aspect is when a planet, sitting "
+              "house. "
+              "Each house also lists which planets aspect it. An aspect is when a planet, sitting "
               "elsewhere in the chart, still casts its influence onto that house, in addition to "
               "whatever planet is physically placed there.")
     y = page_h - 1.15 * inch
