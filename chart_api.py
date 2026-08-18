@@ -885,52 +885,46 @@ def draw_mini_house_diagram(c, pdf_x0, pdf_y0, size):
 INTRO_SECTIONS = [
     ("What is this chart?",
      "This is your natal (birth) chart, calculated using the sidereal "
-     "zodiac with the Lahiri ayanamsa -- the system used in traditional "
+     "zodiac with the Lahiri ayanamsa. The system used in traditional "
      "Vedic (Jyotish) astrology. It's a snapshot of exactly where the Sun, "
      "Moon, and every planet were positioned at the moment and place you "
      "were born."),
     ("The Ascendant (marked 'As')",
      "Your Ascendant is the zodiac sign that was rising on the eastern "
-     "horizon at your exact birth time. It always defines House 1 -- "
-     "everything else in the chart is read relative to it. The Ascendant "
+     "horizon at your exact birth time. Everything else in the chart is read relative to it. The Ascendant "
      "will always fall in the first house, in every chart."),
     ("Houses",
      "The chart is divided into 12 houses, each representing a different "
      "area of life (self, money, communication, home, and so on). This "
-     "chart uses the Whole Sign house system: House 1 is always your "
-     "Ascendant's entire sign, and each house that follows is simply the "
-     "next sign in zodiac order."),
-    ("North Node (Rahu) and South Node (Ketu) -- The Lunar Nodes",
+     "chart uses the Whole Sign house system."),
+    ("North Node (Rahu) and South Node (Ketu): The Lunar Nodes",
      "Rahu (the North Node) and Ketu (the South Node) aren't physical "
-     "planets -- they're the two points where the Moon's orbital path "
+     "planets. They are the two points where the Moon's orbital path "
      "crosses the Sun's."),
     ("Retrograde",
      "A planet marked RETROGRADE appeared to be moving backward through "
-     "the zodiac from Earth's point of view at the moment of your birth "
-     "-- a real, if temporary, optical effect of orbital mechanics, "
-     "traditionally considered to change how that planet's energy "
-     "expresses itself."),
+     "the zodiac from Earth's point of view at the moment of your birth."),
 ]
 
 
 PLANET_MEANINGS = {
-    "Moon": "the mind, emotions, and instinctive reactions -- how you feel and process life day to day.",
-    "Sun": "the core self, willpower, and vitality -- how you shine and lead.",
-    "Mercury": "communication, intellect, and reasoning -- how you think and express ideas.",
-    "Venus": "love, beauty, and pleasure -- what you're drawn to and how you relate to others.",
-    "Mars": "drive, courage, and assertion -- how you act and pursue what you want.",
-    "Jupiter": "growth, wisdom, and fortune -- where life expands and offers meaning.",
-    "Saturn": "discipline, limitation, and time -- where you mature through effort and restriction.",
-    "Rahu": "worldly desire and forward momentum -- what you're pulled toward growing into.",
-    "Ketu": "detachment and past mastery -- what comes naturally but calls for release.",
-    "Uranus": "sudden change, originality, and rebellion -- where you break from convention.",
-    "Neptune": "imagination, spirituality, and illusion -- where boundaries dissolve.",
-    "Pluto": "deep transformation, power, and rebirth -- where old structures break down and remake themselves.",
-    "Ascendant": "the outer personality and how you meet the world -- the lens the whole chart is read through.",
+    "Moon": "the mind, emotions, and instinctive reactions. how you feel and process life day to day.",
+    "Sun": "the core self, willpower, and vitality. how you shine and lead.",
+    "Mercury": "communication, intellect, and reasoning. how you think and express ideas.",
+    "Venus": "love, beauty, and pleasure. what you're drawn to and how you relate to others.",
+    "Mars": "drive, courage, and assertion. how you act and pursue what you want.",
+    "Jupiter": "growth, wisdom, and fortune. where life expands and offers meaning.",
+    "Saturn": "discipline, limitation, and time. where you mature through effort and restriction.",
+    "Rahu": "worldly desire and forward momentum. what you're pulled toward growing into.",
+    "Ketu": "detachment and past mastery. what comes naturally but calls for release.",
+    "Uranus": "sudden change, originality, and rebellion. where you break from convention.",
+    "Neptune": "imagination, spirituality, and illusion. where boundaries dissolve.",
+    "Pluto": "deep transformation, power, and rebirth. where old structures break down and remake themselves.",
+    "Ascendant": "the outer personality and how you meet the world. the lens the whole chart is read through.",
 }
 
 HOUSE_MEANINGS = {
-    1: "self, body, and outward personality -- how you present to the world.",
+    1: "self, body, and outward personality. how you present to the world.",
     2: "wealth, family, speech, and personal values.",
     3: "courage, siblings, effort, and short journeys.",
     4: "home, mother, emotional foundation, and inner comfort.",
@@ -1024,11 +1018,7 @@ def generate_full_chart_pdf(chart_data, chart_title="Your Vedic Birth Chart"):
     c.setFillColorRGB(0.769, 0.659, 0.463)
     c.drawString(0.75 * inch, page_h - 1.4 * inch, "\u25cf")
     c.setFillColorRGB(0, 0, 0)
-    intro_note = ("The small gold number in each section marks that sign's fixed position in the "
-                   "zodiac -- 1 is Aries, 2 is Taurus, and so on through 12 (Pisces). This is the same "
-                   "for every chart. See the Zodiac Key below to decode the numbers, and the table "
-                   "further down for which house each sign occupies specifically in this chart.")
-
+   
     def _wrap_simple(text, max_width, size):
         words, lines, line = text.split(), [], ""
         for word in words:
@@ -1196,7 +1186,6 @@ def generate_full_chart_pdf(chart_data, chart_title="Your Vedic Birth Chart"):
     c.setFont("Times-Bold", 16)
     c.drawString(0.75 * inch, page_h - 0.9 * inch, "Placements")
     c.setFont("Times-Roman", 9)
-    placements_intro = ("This section walks through each placement in order.")
     y = page_h - 1.15 * inch
     for ln in _wrap(placements_intro, page_w - 1.5 * inch, 9):
         c.drawString(0.75 * inch, y, ln)
