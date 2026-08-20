@@ -938,6 +938,21 @@ HOUSE_MEANINGS = {
     12: "release, solitude, and what lies beyond the material.",
 }
 
+# Section intros for the PDF -- kept here as named constants (rather than
+# inline strings) so they're easy to find and tweak later, matching the
+# pattern used by INTRO_SECTIONS / PLANET_MEANINGS / HOUSE_MEANINGS above.
+intro_note = (
+    "The gold numbers mark each house's zodiac sign (1 = Aries through "
+    "12 = Pisces). Colored abbreviations show which planets sit in that "
+    "house, each with its exact degree."
+)
+placements_intro = (
+    "This section walks through where each planet landed in your chart "
+    "-- which sign, at what degree, and in which house -- starting with "
+    "the Moon, since it sets the tone for how everything else is "
+    "experienced."
+)
+
 
 def generate_full_chart_pdf(chart_data, chart_title="Your Vedic Birth Chart"):
     from reportlab.pdfgen import canvas as pdfcanvas
@@ -1271,10 +1286,10 @@ def generate_full_chart_pdf(chart_data, chart_title="Your Vedic Birth Chart"):
         y -= 0.18 * inch
 
 
-    # -- Page 5: Planetary Aspects (conjunction/sextile/square/trine/opposition) --
+    # -- Page 5: Planetary Angles (conjunction/sextile/square/trine/opposition) --
     c.showPage()
     c.setFont("Times-Bold", 16)
-    c.drawString(0.75 * inch, page_h - 0.9 * inch, "Planetary Aspects")
+    c.drawString(0.75 * inch, page_h - 0.9 * inch, "Planetary Angles")
 
     ASPECT_MEANINGS = [
         ("Conjunction (0\u00b0)", "The two bodies sit at nearly the same degree -- "
