@@ -924,18 +924,18 @@ PLANET_MEANINGS = {
 }
 
 HOUSE_MEANINGS = {
-    1: "self, body, and outward personality. how you present to the world.",
-    2: "wealth, family, speech, and personal values.",
-    3: "courage, siblings, effort, and short journeys.",
-    4: "home, mother, emotional foundation, and inner comfort.",
-    5: "creativity, romance, children, and intelligence.",
-    6: "health, daily work, obstacles, and conflict.",
-    7: "partnership, marriage, and one-on-one relationships.",
-    8: "transformation, shared resources, and the unknown.",
-    9: "higher learning, philosophy, fortune, and long journeys.",
-    10: "career, public standing, and life direction.",
-    11: "gains, community, and hopes for the future.",
-    12: "release, solitude, and what lies beyond the material.",
+    1: "physical body, overall health and vitality, personality, temperament, appearance, and how you present yourself to the world. It also touches longevity, general well-being, and one's sense of self.",
+    2: "accumulated wealth and resources, family and family values, speech and voice, food and dietary habits, and personal values. It reflects self-worth and what one considers valuable enough to hold onto.",
+    3: "courage, initiative, and self-effort, younger siblings, communication and short journeys, hobbies and skills, and the hands and arms. It's the house of valor -- the willingness to act.",
+    4: "home and property, the mother, emotional foundation and inner comfort, vehicles, early education, and one's roots. It's where a sense of peace and belonging is built.",
+    5: "children, creativity and intelligence, romance, past-life merit (purva punya), speculation, and spiritual practice such as mantra. It governs how one creates and what one brings into being.",
+    6: "health and disease, daily work and service, obstacles, debts, litigation, competition, and rivals. It's the house of struggle -- where effort is required to overcome resistance.",
+    7: "marriage and partnerships, the spouse, business relationships, public dealings, open enemies, and contracts. It's the house of the 'other' -- anyone met as an equal.",
+    8: "transformation, longevity, shared resources such as inheritance or insurance, hidden or occult knowledge, sudden events, and in-laws. It marks the threshold between what's known and unknown.",
+    9: "higher learning, philosophy and religion, the father, one's guru or teachers, fortune and luck, and long-distance or foreign travel. It's the house of dharma -- one's higher purpose.",
+    10: "career and profession, public standing and reputation, authority, and actions taken in the world. It reflects how one rises, achieves, and is recognized.",
+    11: "gains and income, hopes and wishes, elder siblings, friendships, and social networks. It's the house of fulfillment -- where desires find their outlet.",
+    12: "loss and expenditure, solitude, foreign lands, spirituality and liberation (moksha), sleep, and letting go. It's the house of release -- where the material world falls away.",
 }
 
 # Section intros for the PDF -- kept here as named constants (rather than
@@ -1223,7 +1223,14 @@ def generate_full_chart_pdf(chart_data, chart_title="Your Vedic Birth Chart"):
             continue
         heading = f"{p['display_name']} ({p['abbr']})" + (" -- Retrograde" if p.get("retrograde") else "")
         meaning = PLANET_MEANINGS.get(name, "")
-        paragraph = (f"{meaning} Placed in {p['sign']} at {p['degree']:.1f}\u00b0, in House {p['house']}.")
+        ruled_houses = [h["house"] for h in chart_data["houses"] if h.get("ruler") == name]
+        if len(ruled_houses) == 1:
+            rules_prefix = f"Ruler of House {ruled_houses[0]}. "
+        elif len(ruled_houses) > 1:
+            rules_prefix = "Ruler of Houses " + " and ".join(str(h) for h in ruled_houses) + ". "
+        else:
+            rules_prefix = ""
+        paragraph = (f"{rules_prefix}{meaning} Placed in {p['sign']} at {p['degree']:.1f}\u00b0, in House {p['house']}.")
 
         body_lines = _wrap(paragraph, page_w - 1.5 * inch, 9.5)
         block_height = 0.22 * inch + len(body_lines) * 0.16 * inch + 0.18 * inch
