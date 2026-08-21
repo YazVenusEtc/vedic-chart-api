@@ -86,6 +86,7 @@ PLANET_ABBR = {
     "Jupiter": "Ju", "Saturn": "Sa", "Uranus": "Ur", "Neptune": "Ne",
     "Pluto": "Pl", "Rahu": "Ra", "Ketu": "Ke", "Ascendant": "As",
 }
+ABBR_TO_NAME = {abbr: name for name, abbr in PLANET_ABBR.items()}
 DISPLAY_NAME = {"Rahu": "North Node", "Ketu": "South Node"}
 
 # Classical Parashari graha drishti (whole-sign aspects). Every graha
@@ -440,6 +441,55 @@ def compute_natal_chart(year, month, day, hour, minute, city):
     )
 
 
+def resolve_location_label(lat, lon):
+    """Best-effort reverse geocode for display purposes -- falls back to
+    raw coordinates rather than failing the whole request over what's
+    just a cosmetic label."""
+    try:
+        geolocator = Nominatim(user_agent="natal_chart_api")
+        reverse = geolocator.reverse((lat, lon), language="en")
+        return reverse.address if reverse else f"{lat:.4f}, {lon:.4f}"
+    except Exception:
+        return f"{lat:.4f}, {lon:.4f}"
+
+
+def compute_transit_planets(natal_chart_data, lat, lon):
+    """Current planetary positions (right now, at the given coordinates),
+    mapped into the HOUSES OF AN ALREADY-COMPUTED NATAL CHART -- i.e.
+    classic gochara-style transit analysis, read against the person's own
+    natal houses rather than a fresh ascendant of the current moment.
+    Returns (planets, now_local_datetime, timezone_name)."""
+    tf = TimezoneFinder()
+    tz_name = tf.timezone_at(lat=lat, lng=lon)
+    if tz_name is None:
+        raise ValueError(f"Could not determine a timezone for ({lat}, {lon})")
+
+    now_local = dt.datetime.now(ZoneInfo(tz_name))
+    utc_dt = now_local.astimezone(dt.timezone.utc)
+    jd = swe.julday(utc_dt.year, utc_dt.month, utc_dt.day,
+                     utc_dt.hour + utc_dt.minute / 60.0)
+
+    asc_sign = natal_chart_data["ascendant"]["sign"]
+    asc_sign_index = SIGNS.index(asc_sign)
+
+    planets = []
+    for name in list(BODIES.keys()) + ["Ketu"]:
+        p_lon, speed, retro = sidereal_lon_and_speed(jd, name)
+        sign, deg = sign_and_degree(p_lon)
+        sign_index = SIGNS.index(sign)
+        house = whole_sign_house(sign_index, asc_sign_index)
+        planets.append({
+            "name": name,
+            "display_name": DISPLAY_NAME.get(name, name),
+            "abbr": PLANET_ABBR.get(name, name),
+            "sign": sign,
+            "degree": round(deg, 2),
+            "house": house,
+            "retrograde": retro,
+        })
+    return planets, now_local, tz_name
+
+
 # ----------------------------------------------------------------------
 # NORTH INDIAN CHART SVG
 # ----------------------------------------------------------------------
@@ -599,7 +649,7 @@ def generate_north_indian_chart_svg(chart_data, canvas_width=1200, canvas_height
         f'<rect x="0" y="0" width="{canvas_width}" height="{canvas_height}" fill="white"/>',
         f'<text x="{canvas_width/2}" y="{margin_y * 0.5}" text-anchor="middle" '
         f'font-family="sans-serif" font-size="15" letter-spacing="3" fill="#9C9488">'
-        f'WHOLE SIGN HOUSES</text>',
+        f'SEE KEY BELOW</text>',
     ]
 
     glow_r = min(width, height) * 0.16
@@ -695,7 +745,225 @@ def generate_north_indian_chart_svg(chart_data, canvas_width=1200, canvas_height
             cx = start_x
             for i, (label, color) in enumerate(line_items):
                 prefix = ", " if i > 0 else ""
-                tspans.append(f'<tspan fill="{color}">{prefix}{label}</tspan>')
+                # label is "{abbr} {degree}\u00b0" (e.g. "As 8.6\u00b0") -- split
+                # on the first space so the abbreviation can render bold
+                # while the degree stays regular weight. The abbreviation
+                # also gets tagged with the planet's raw name so the
+                # embedding page can wire up a hover/tap definition.
+                space_idx = label.find(" ")
+                abbr_part, degree_part = (label, "") if space_idx == -1 else (label[:space_idx], label[space_idx:])
+                planet_name = ABBR_TO_NAME.get(abbr_part, "")
+                tspans.append(
+                    f'<tspan fill="{color}">{prefix}</tspan>'
+                    f'<tspan fill="{color}" font-weight="600" class="vbc-planet-tspan" '
+                    f'data-planet="{planet_name}" style="cursor:pointer">{abbr_part}</tspan>'
+                    f'<tspan fill="{color}">{degree_part}</tspan>'
+                )
+            svg_lines.append(
+                f'<text x="{start_x:.1f}" y="{top_y + local_y:.1f}" font-size="{body_font}" '
+                f'text-anchor="start" font-family="Poppins, sans-serif">{"".join(tspans)}</text>'
+            )
+
+    svg_lines.append('</svg>')
+    return "\n".join(svg_lines)
+
+
+def _house_text_content_with_transits(natal_chart_data, transit_planets):
+    """Like _house_text_content, but merges in a second planet set (the
+    current transiting positions, already mapped into the natal chart's
+    houses by compute_transit_planets) so both can be drawn in one
+    diagram. Each body becomes a (label, color, is_transit) triple
+    instead of the natal-only (label, color) pair, so the renderer can
+    style transit labels distinctly from natal ones."""
+    asc_sign = natal_chart_data["ascendant"]["sign"]
+    asc_index = SIGNS.index(asc_sign)
+    house_sign = {h: SIGNS[(asc_index + h - 1) % 12] for h in range(1, 13)}
+
+    by_house = {h: [] for h in range(1, 13)}
+    by_house[1].append((f"As {natal_chart_data['ascendant']['degree']:.1f}\u00b0", PLANET_COLORS["Ascendant"], False))
+    for p in natal_chart_data["planets"]:
+        abbr = PLANET_ABBR.get(p["name"], p["name"])
+        color = PLANET_COLORS.get(p["name"], "#333333")
+        label = f"{abbr} {p['degree']:.1f}\u00b0"
+        by_house[p["house"]].append((label, color, False))
+    for tp in transit_planets:
+        abbr = PLANET_ABBR.get(tp["name"], tp["name"])
+        color = PLANET_COLORS.get(tp["name"], "#333333")
+        label = f"{abbr} {tp['degree']:.1f}\u00b0"
+        by_house[tp["house"]].append((label, color, True))
+
+    content = {}
+    for house_num in range(1, 13):
+        sign_number = SIGNS.index(house_sign[house_num]) + 1
+        content[house_num] = (sign_number, by_house[house_num])
+    return content
+
+
+def generate_north_indian_chart_svg_with_transits(natal_chart_data, transit_planets,
+                                                    canvas_width=1200, canvas_height=1000):
+    """Natal chart diagram with the current transiting planets layered
+    into the same house cells (gochara-style), rather than as a second,
+    separate diagram. Transit labels are visually distinguished from
+    natal ones: a small muted "T" marker, italic, and slightly lower
+    opacity, so at a glance natal placements still read as the primary
+    layer and transits as an overlay on top of them."""
+    margin_x = canvas_width * 0.07
+    margin_y = canvas_height * 0.10
+    width = canvas_width - 2 * margin_x
+    height = canvas_height - 2 * margin_y
+    x0, y0 = margin_x, margin_y
+    houses = build_house_polygons(x0, y0, width, height)
+    content = _house_text_content_with_transits(natal_chart_data, transit_planets)
+    center_x, center_y = x0 + width / 2, y0 + height / 2
+
+    svg_lines = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{canvas_width}" '
+        f'height="{canvas_height}" viewBox="0 0 {canvas_width} {canvas_height}">',
+        '<defs>',
+        '<radialGradient id="vbcCenterGlow" cx="50%" cy="50%" r="50%">',
+        '<stop offset="0%" stop-color="#E8ECFB" stop-opacity="0.9"/>',
+        '<stop offset="60%" stop-color="#EEF1FC" stop-opacity="0.5"/>',
+        '<stop offset="100%" stop-color="#F5F7FD" stop-opacity="0"/>',
+        '</radialGradient>',
+        '</defs>',
+        f'<rect x="0" y="0" width="{canvas_width}" height="{canvas_height}" fill="white"/>',
+        f'<text x="{canvas_width/2}" y="{margin_y * 0.5}" text-anchor="middle" '
+        f'font-family="sans-serif" font-size="15" letter-spacing="3" fill="#9C9488">'
+        f'SEE KEY BELOW</text>',
+    ]
+
+    glow_r = min(width, height) * 0.16
+    svg_lines.append(f'<circle cx="{center_x}" cy="{center_y}" r="{glow_r}" fill="url(#vbcCenterGlow)"/>')
+
+    NUMBER_FONT_RATIO = 0.75
+    CONTENT_CANDIDATES = [40, 36, 32, 28, 26, 24, 22, 20, 18, 16, 14, 12, 10, 8]
+
+    def wrap_colored_items_3(items, max_width, font_size, avg_char_ratio=0.56):
+        lines, current, current_width = [], [], 0.0
+        sep_width = estimate_text_width(", ", font_size, avg_char_ratio)
+        for label, color, is_transit in items:
+            item_width = estimate_text_width(label, font_size, avg_char_ratio)
+            added_width = (sep_width if current else 0) + item_width
+            if current and (current_width + added_width) > max_width:
+                lines.append(current)
+                current, current_width = [(label, color, is_transit)], item_width
+            else:
+                current.append((label, color, is_transit))
+                current_width += added_width
+        if current:
+            lines.append(current)
+        return lines
+
+    def colored_line_width_3(line_items, font_size, avg_char_ratio=0.56):
+        sep_width = estimate_text_width(", ", font_size, avg_char_ratio)
+        total = sum(estimate_text_width(lbl, font_size, avg_char_ratio) for lbl, _, _ in line_items)
+        return total + sep_width * max(len(line_items) - 1, 0)
+
+    per_house_geometry = {}
+    for house_num, pts in houses.items():
+        bbox = polygon_bbox(pts)
+        bbox_w, bbox_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        wrap_width = bbox_w * 0.80
+        safe_height = bbox_h * 0.72
+        per_house_geometry[house_num] = (wrap_width, safe_height, polygon_centroid(pts))
+
+    def fits_canvas(centroid_x, text, font_size):
+        half = estimate_text_width(text, font_size) / 2.0
+        return (centroid_x - half) >= margin_x * 0.4 and (centroid_x + half) <= (canvas_width - margin_x * 0.4)
+
+    def layout_fits(body_font):
+        number_font = max(int(body_font * NUMBER_FONT_RATIO), 8)
+        number_line_height = number_font * 1.2
+        body_line_height = body_font * 1.25
+        layout = {}
+        for house_num, pts in houses.items():
+            wrap_width, safe_height, centroid = per_house_geometry[house_num]
+            sign_number, bodies = content[house_num]
+            number_text = str(sign_number)
+
+            if not fits_canvas(centroid[0], number_text, number_font):
+                return None
+
+            wrapped_lines = wrap_colored_items_3(bodies, wrap_width, body_font) if bodies else []
+            for line_items in wrapped_lines:
+                combined = ", ".join(lbl for lbl, _, _ in line_items)
+                if not fits_canvas(centroid[0], combined, body_font):
+                    return None
+
+            total_height = number_line_height + (0.3 * body_line_height if wrapped_lines else 0) \
+                + len(wrapped_lines) * body_line_height
+            if total_height > safe_height:
+                return None
+
+            layout[house_num] = (number_text, wrapped_lines)
+        return layout, number_font, body_font
+
+    result = None
+    for candidate in CONTENT_CANDIDATES:
+        result = layout_fits(candidate)
+        if result is not None:
+            break
+    if result is None:
+        smallest = CONTENT_CANDIDATES[-1]
+        layout = {h: (str(content[h][0]), [[item] for item in content[h][1]]) for h in range(1, 13)}
+        result = (layout, max(int(smallest * NUMBER_FONT_RATIO), 8), smallest)
+    layout, number_font, body_font = result
+    number_line_height = number_font * 1.2
+    body_line_height = body_font * 1.25
+
+    for house_num, pts in houses.items():
+        points_str = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
+        svg_lines.append(
+            f'<polygon points="{points_str}" fill="none" '
+            f'stroke="{CHART_LINE_COLOR}" stroke-width="1.3"/>'
+        )
+
+        _, _, centroid = per_house_geometry[house_num]
+        number_text, wrapped_lines = layout[house_num]
+
+        cursor = 0.0
+        number_local_y = cursor + number_line_height * 0.8
+        cursor += number_line_height
+        if wrapped_lines:
+            cursor += 0.3 * body_line_height
+        line_positions = []
+        for line_items in wrapped_lines:
+            line_positions.append((line_items, cursor + body_line_height * 0.8))
+            cursor += body_line_height
+
+        top_y = centroid[1] - cursor / 2.0
+
+        svg_lines.append(
+            f'<text x="{centroid[0]:.1f}" y="{top_y + number_local_y:.1f}" font-size="{number_font}" '
+            f'text-anchor="middle" fill="{CHART_NUMBER_COLOR}" '
+            f'font-family="Poppins, sans-serif">{number_text}</text>'
+        )
+
+        for line_items, local_y in line_positions:
+            line_width = colored_line_width_3(line_items, body_font)
+            start_x = centroid[0] - line_width / 2.0
+            tspans = []
+            for i, (label, color, is_transit) in enumerate(line_items):
+                prefix = ", " if i > 0 else ""
+                space_idx = label.find(" ")
+                abbr_part, degree_part = (label, "") if space_idx == -1 else (label[:space_idx], label[space_idx:])
+                planet_name = ABBR_TO_NAME.get(abbr_part, "")
+                if is_transit:
+                    tspans.append(
+                        f'<tspan fill="{color}">{prefix}</tspan>'
+                        f'<tspan fill="#8A8177" font-size="{body_font * 0.72:.1f}">T </tspan>'
+                        f'<tspan fill="{color}" font-style="italic" fill-opacity="0.82" '
+                        f'class="vbc-planet-tspan" data-planet="{planet_name}" '
+                        f'style="cursor:pointer">{abbr_part}</tspan>'
+                        f'<tspan fill="{color}" font-style="italic" fill-opacity="0.82">{degree_part}</tspan>'
+                    )
+                else:
+                    tspans.append(
+                        f'<tspan fill="{color}">{prefix}</tspan>'
+                        f'<tspan fill="{color}" font-weight="600" class="vbc-planet-tspan" '
+                        f'data-planet="{planet_name}" style="cursor:pointer">{abbr_part}</tspan>'
+                        f'<tspan fill="{color}">{degree_part}</tspan>'
+                    )
             svg_lines.append(
                 f'<text x="{start_x:.1f}" y="{top_y + local_y:.1f}" font-size="{body_font}" '
                 f'text-anchor="start" font-family="Poppins, sans-serif">{"".join(tspans)}</text>'
@@ -842,13 +1110,29 @@ def draw_chart_on_pdf_canvas(c, chart_data, x0, y0, width, height):
             line_width = colored_line_width_pdf(line_items, CHART_FONT_REGULAR, body_font)
             cx = centroid_pdf[0] - line_width / 2.0
             for i, (label, color_hex) in enumerate(line_items):
-                text = (", " if i > 0 else "") + label
+                prefix = ", " if i > 0 else ""
                 r = int(color_hex[1:3], 16) / 255
                 g = int(color_hex[3:5], 16) / 255
                 b = int(color_hex[5:7], 16) / 255
                 c.setFillColorRGB(r, g, b)
-                c.drawString(cx, y, text)
-                cx += c.stringWidth(text, CHART_FONT_REGULAR, body_font)
+
+                # label is "{abbr} {degree}\u00b0" (e.g. "As 8.6\u00b0") -- split
+                # on the first space so the abbreviation can render bold
+                # while the degree stays regular weight.
+                space_idx = label.find(" ")
+                abbr_part, degree_part = (label, "") if space_idx == -1 else (label[:space_idx], label[space_idx:])
+
+                c.setFont(CHART_FONT_REGULAR, body_font)
+                c.drawString(cx, y, prefix)
+                cx += c.stringWidth(prefix, CHART_FONT_REGULAR, body_font)
+
+                c.setFont(CHART_FONT_BOLD, body_font)
+                c.drawString(cx, y, abbr_part)
+                cx += c.stringWidth(abbr_part, CHART_FONT_BOLD, body_font)
+
+                c.setFont(CHART_FONT_REGULAR, body_font)
+                c.drawString(cx, y, degree_part)
+                cx += c.stringWidth(degree_part, CHART_FONT_REGULAR, body_font)
     c.setFillColorRGB(0, 0, 0)
 
 
@@ -1271,9 +1555,9 @@ def generate_full_chart_pdf(chart_data, chart_title="Your Vedic Birth Chart"):
             f"{b['display_name']} ({b['abbr']}) {b['degree']:.1f}\u00b0" for b in house_data["bodies"]
         ) or "no placements"
         aspects_text = ", ".join(
-            f"{a['display_name']} ({a['abbr']})" for a in house_data["aspects"]
+            f"{a['display_name']} ({a['abbr']}) {a['degree']:.1f}\u00b0" for a in house_data["aspects"]
         ) or "none"
-        paragraph = (f"This house rules {HOUSE_MEANINGS.get(h, '')} "
+        paragraph = (f"This house indicates {HOUSE_MEANINGS.get(h, '')} "
                      f"Placed here: {bodies_text}. Aspected by: {aspects_text}.")
 
         body_lines = _wrap(paragraph, page_w - 1.5 * inch, 9.5)
@@ -1329,8 +1613,8 @@ def generate_full_chart_pdf(chart_data, chart_title="Your Vedic Birth Chart"):
     c.drawString(0.75 * inch, y, f"Orb used: aspects within {ASPECT_ANGLE_ORB:.0f}\u00b0 of exact are shown below.")
     y -= 0.35 * inch
 
-    col_x3 = [0.75 * inch, 2.6 * inch, 4.45 * inch, 5.7 * inch]
-    headers3 = ["Body 1", "Body 2", "Aspect", "Orb"]
+    col_x3 = [0.75 * inch, 3.0 * inch, 5.25 * inch]
+    headers3 = ["Body 1", "Body 2", "Aspect"]
     c.setFont("Times-Bold", 9)
     for cx, h in zip(col_x3, headers3):
         c.drawString(cx, y, h)
@@ -1348,7 +1632,6 @@ def generate_full_chart_pdf(chart_data, chart_title="Your Vedic Birth Chart"):
             c.drawString(col_x3[0], y, f"{a['body1']} ({a['abbr1']})")
             c.drawString(col_x3[1], y, f"{a['body2']} ({a['abbr2']})")
             c.drawString(col_x3[2], y, a['aspect'])
-            c.drawString(col_x3[3], y, f"{a['orb']:.2f}\u00b0")
             y -= 0.18 * inch
 
     c.save()
@@ -1498,6 +1781,49 @@ def api_chart_now_svg():
         lat, lon = parse_coords_args(request.args)
         chart_data = compute_chart_for_now(lat, lon)
         svg = generate_north_indian_chart_svg(chart_data)
+        return Response(svg, mimetype="image/svg+xml")
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": f"Unexpected error: {e}"}), 500
+
+
+@app.route("/api/chart-transit-overlay")
+def api_chart_transit_overlay():
+    """Current transiting planets, mapped into the houses of the natal
+    chart identified by the given birth params (gochara-style), plus the
+    timestamp/location the transits were calculated for -- everything the
+    embedding page needs for the overlay diagram's caption, short of the
+    SVG itself (see /api/chart-transit-overlay-svg for that)."""
+    try:
+        year, month, day, hour, minute, city = parse_birth_args(request.args)
+        lat, lon = parse_coords_args(request.args)
+        chart_data = compute_natal_chart(year, month, day, hour, minute, city)
+        transit_planets, now_local, tz_name = compute_transit_planets(chart_data, lat, lon)
+        location_label = resolve_location_label(lat, lon)
+        return jsonify({
+            "local_datetime": now_local.strftime("%Y-%m-%d %H:%M"),
+            "timezone": tz_name,
+            "resolved_address": location_label,
+            "transit_planets": transit_planets,
+        })
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": f"Unexpected error: {e}"}), 500
+
+
+@app.route("/api/chart-transit-overlay-svg")
+def api_chart_transit_overlay_svg():
+    """The natal chart diagram with current transiting planets layered
+    into the same house cells, as one combined image rather than two
+    separate diagrams."""
+    try:
+        year, month, day, hour, minute, city = parse_birth_args(request.args)
+        lat, lon = parse_coords_args(request.args)
+        chart_data = compute_natal_chart(year, month, day, hour, minute, city)
+        transit_planets, _now_local, _tz_name = compute_transit_planets(chart_data, lat, lon)
+        svg = generate_north_indian_chart_svg_with_transits(chart_data, transit_planets)
         return Response(svg, mimetype="image/svg+xml")
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
