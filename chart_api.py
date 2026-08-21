@@ -135,13 +135,25 @@ ASPECT_ANGLE_DEFINITIONS = [
 ]
 ASPECT_ANGLE_ORB = 6.0  # degrees of allowed deviation from an exact angle
 
+# Wider than ASPECT_ANGLE_ORB on purpose -- used only for the Placements
+# section's per-body "significant aspects" listing, not the main
+# Planetary Angles table, which keeps its tighter 6\u00b0 orb.
+SIGNIFICANT_ASPECT_ORB = 10.0
 
-def compute_planetary_aspects(bodies):
+
+def compute_planetary_aspects(bodies, orb=None):
     """bodies: list of (display_name, abbr, longitude) tuples -- every
     body to check pairwise against every other (typically the Ascendant
     plus all planets). Returns a list of dicts, one per aspect actually
     found (i.e. within orb), each noting the two bodies, the aspect type,
-    and how many degrees off from exact ("orb") it is."""
+    and how many degrees off from exact ("orb") it is.
+
+    orb defaults to ASPECT_ANGLE_ORB (the Planetary Angles table's 6\u00b0),
+    but callers can pass a different value -- e.g. the Placements
+    section's wider 10\u00b0 "significant aspects" listing -- without
+    affecting the default orb used everywhere else."""
+    if orb is None:
+        orb = ASPECT_ANGLE_ORB
     results = []
     n = len(bodies)
     for i in range(n):
@@ -152,13 +164,13 @@ def compute_planetary_aspects(bodies):
             if diff > 180:
                 diff = 360 - diff
             for aspect_name, exact_deg in ASPECT_ANGLE_DEFINITIONS:
-                orb = abs(diff - exact_deg)
-                if orb <= ASPECT_ANGLE_ORB:
+                found_orb = abs(diff - exact_deg)
+                if found_orb <= orb:
                     results.append({
                         "body1": name1, "abbr1": abbr1,
                         "body2": name2, "abbr2": abbr2,
                         "aspect": aspect_name,
-                        "orb": round(orb, 2),
+                        "orb": round(found_orb, 2),
                     })
     return results
 
@@ -371,6 +383,23 @@ def compute_chart_from_coords(year, month, day, hour, minute, lat, lon, location
     ]
     planetary_aspects = compute_planetary_aspects(aspect_bodies)
 
+    # A separate, wider-orb pass just for the Placements section's
+    # per-body "significant aspects" listing -- intentionally looser
+    # than the 6\u00b0 orb used for the main Planetary Angles table, so it
+    # surfaces looser-but-still-meaningful aspects a reading would want
+    # to know about for each individual planet.
+    significant_aspects_raw = compute_planetary_aspects(aspect_bodies, orb=SIGNIFICANT_ASPECT_ORB)
+    significant_aspects_by_name = {name: [] for name, _, _ in aspect_bodies}
+    for a in significant_aspects_raw:
+        significant_aspects_by_name[a["body1"]].append({
+            "body": a["body2"], "abbr": a["abbr2"], "aspect": a["aspect"], "orb": a["orb"],
+        })
+        significant_aspects_by_name[a["body2"]].append({
+            "body": a["body1"], "abbr": a["abbr1"], "aspect": a["aspect"], "orb": a["orb"],
+        })
+    for entries in significant_aspects_by_name.values():
+        entries.sort(key=lambda e: e["orb"])
+
     by_house_bodies = {h: [] for h in range(1, 13)}
     by_house_bodies[1].append({"name": "Ascendant", "display_name": "Ascendant",
                                  "abbr": "As", "degree": round(asc_deg, 2)})
@@ -379,6 +408,7 @@ def compute_chart_from_coords(year, month, day, hour, minute, lat, lon, location
             "name": p["name"], "display_name": p["display_name"],
             "abbr": p["abbr"], "degree": p["degree"],
         })
+        p["significant_aspects"] = significant_aspects_by_name.get(p["display_name"], [])
 
     houses = []
     for h in range(1, 13):
@@ -420,6 +450,7 @@ def compute_chart_from_coords(year, month, day, hour, minute, lat, lon, location
             "degree": round(asc_deg, 2),
             "house": 1,
             "meaning": PLANET_MEANINGS.get("Ascendant", ""),
+            "significant_aspects": significant_aspects_by_name.get("Ascendant", []),
         },
         "planets": planets,
         "houses": houses,
@@ -1192,28 +1223,28 @@ INTRO_SECTIONS = [
 
 
 PLANET_MEANINGS = {
-    "Moon": "the mind, emotions, and instinctive reactions. how you feel and process life day to day.",
-    "Sun": "the core self, willpower, and vitality. how you shine and lead.",
-    "Mercury": "communication, intellect, and reasoning. how you think and express ideas.",
-    "Venus": "love, beauty, and pleasure. what you're drawn to and how you relate to others.",
-    "Mars": "drive, courage, and assertion. how you act and pursue what you want.",
-    "Jupiter": "growth, wisdom, and fortune. where life expands and offers meaning.",
-    "Saturn": "discipline, limitation, and time. where you mature through effort and restriction.",
-    "Rahu": "worldly desire and forward momentum. what you're pulled toward growing into.",
-    "Ketu": "detachment and past mastery. what comes naturally but calls for release.",
-    "Uranus": "sudden change, originality, and rebellion. where you break from convention.",
-    "Neptune": "imagination, spirituality, and illusion. where boundaries dissolve.",
-    "Pluto": "deep transformation, power, and rebirth. where old structures break down and remake themselves.",
-    "Ascendant": "the outer personality and how you meet the world. the lens the whole chart is read through.",
+    "Moon": "The mind, emotions and instinctive responses. How it feels to process day to day life.",
+    "Sun": "The core self, willpower and vitality. How you lead and how you are in the spotlight.",
+    "Mercury": "Communication, intellect and reasoning. How you think and express ideas.",
+    "Venus": "Love, beauty and pleasure. How you relate to others and what you are naturally drawn to.",
+    "Mars": "Drive, courage and assertion. How you pursue your desires.",
+    "Jupiter": "Growth, wisdom and fortune. Where life expands and creates meaning.",
+    "Saturn": "Discipline, limitation and time. Where you mature through effort and restriction (overcoming challenges).",
+    "Rahu": "Worldly desire, power and forward momentum. What you are insatiably pulled toward.",
+    "Ketu": "Detachment and your soul's past mastery. What comes naturally but acts illusively.",
+    "Uranus": "Sudden change, originality and rebellion. Where you may break conventions.",
+    "Neptune": "Imagination, spirituality and illusion. Boundlessness or boundaryless.",
+    "Pluto": "Drive, courage and assertion. How you pursue your desires.",
+    "Ascendant": "The outer personality and how you meet the world. Physical body, health, appearance.",
 }
 
 HOUSE_MEANINGS = {
-    1: "physical body, overall health and vitality, personality, temperament, appearance, and how you present yourself to the world. It also touches longevity, general well-being, and one's sense of self.",
+    1: "physical body, overall health and vitality, personality, temperament, appearance, and how you present yourself to the world. It also influences longevity, general well-being, and sense of self.",
     2: "accumulated wealth and resources, family and family values, speech and voice, food and dietary habits, and personal values. It reflects self-worth and what one considers valuable enough to hold onto.",
-    3: "courage, initiative, and self-effort, younger siblings, communication and short journeys, hobbies and skills, and the hands and arms. It's the house of valor -- the willingness to act.",
+    3: "courage, initiative, and self-effort, younger siblings, communication and short journeys, hobbies and skills, music, and the hands and arms. It's the house of valor -- the willingness to act.",
     4: "home and property, the mother, emotional foundation and inner comfort, vehicles, early education, and one's roots. It's where a sense of peace and belonging is built.",
-    5: "children, creativity and intelligence, romance, past-life merit (purva punya), speculation, and spiritual practice such as mantra. It governs how one creates and what one brings into being.",
-    6: "health and disease, daily work and service, obstacles, debts, litigation, competition, and rivals. It's the house of struggle -- where effort is required to overcome resistance.",
+    5: "children, creativity and intelligence, romance, the arts, past-life merit (purva punya), speculation, and spiritual practice such as mantra. It governs how one creates and what one brings into being.",
+    6: "health and injury, daily work and service, obstacles, debts, litigation, competition, and rivals. It's the house of struggle -- where effort is required to overcome resistance.",
     7: "marriage and partnerships, the spouse, business relationships, public dealings, open enemies, and contracts. It's the house of the 'other' -- anyone met as an equal.",
     8: "transformation, longevity, shared resources such as inheritance or insurance, hidden or occult knowledge, sudden events, and in-laws. It marks the threshold between what's known and unknown.",
     9: "higher learning, philosophy and religion, the father, one's guru or teachers, fortune and luck, and long-distance or foreign travel. It's the house of dharma -- one's higher purpose.",
@@ -1423,7 +1454,7 @@ def generate_full_chart_pdf(chart_data, chart_title="Your Vedic Birth Chart"):
     # Mahadasha/Antardasha periods --
     c.showPage()
     c.setFont(CHART_FONT_BOLD, 16)
-    c.drawString(0.75 * inch, page_h - 0.9 * inch, "Vimshottari Dasha")
+    c.drawString(0.75 * inch, page_h - 0.9 * inch, "Vimshottari Dasha (Dasa, Planetary Periods)")
     c.setFont(CHART_FONT_REGULAR, 9)
     dasha_note = ("The Vimshottari Dasha system marks out major life periods (Mahadasha) and their "
                    "sub-periods (Antardasha), based on the Moon's position at birth. Shown below: the "
@@ -1494,7 +1525,8 @@ def generate_full_chart_pdf(chart_data, chart_title="Your Vedic Birth Chart"):
     placements_by_name = {"Ascendant": {"display_name": "Ascendant", "abbr": "As",
                                           "sign": chart_data["ascendant"]["sign"],
                                           "degree": chart_data["ascendant"]["degree"],
-                                          "house": 1, "retrograde": False}}
+                                          "house": 1, "retrograde": False,
+                                          "significant_aspects": chart_data["ascendant"].get("significant_aspects", [])}}
     for p in chart_data["planets"]:
         placements_by_name[p["name"]] = p
 
@@ -1505,7 +1537,10 @@ def generate_full_chart_pdf(chart_data, chart_title="Your Vedic Birth Chart"):
         p = placements_by_name.get(name)
         if p is None:
             continue
-        heading = f"{p['display_name']} ({p['abbr']})" + (" -- Retrograde" if p.get("retrograde") else "")
+        # Rahu and Ketu are always retrograde by nature -- the label
+        # would just be permanent noise, so it's suppressed for those two.
+        show_retrograde = p.get("retrograde") and name not in ("Rahu", "Ketu")
+        heading = f"{p['display_name']} ({p['abbr']})" + (" -- Retrograde" if show_retrograde else "")
         meaning = PLANET_MEANINGS.get(name, "")
         ruled_houses = [h["house"] for h in chart_data["houses"] if h.get("ruler") == name]
         if len(ruled_houses) == 1:
@@ -1514,7 +1549,12 @@ def generate_full_chart_pdf(chart_data, chart_title="Your Vedic Birth Chart"):
             rules_prefix = "Ruler of Houses " + " and ".join(str(h) for h in ruled_houses) + ". "
         else:
             rules_prefix = ""
-        paragraph = (f"{rules_prefix}{meaning} Placed in {p['sign']} at {p['degree']:.1f}\u00b0, in House {p['house']}.")
+        sig_aspects = p.get("significant_aspects", [])
+        sig_text = ", ".join(
+            f"{a['aspect']} to {a['body']} ({a['orb']:.1f}\u00b0 orb)" for a in sig_aspects
+        ) if sig_aspects else "none"
+        paragraph = (f"{rules_prefix}{meaning} Placed in {p['sign']} at {p['degree']:.1f}\u00b0, in House {p['house']}. "
+                     f"Significant aspects: {sig_text}.")
 
         body_lines = _wrap(paragraph, page_w - 1.5 * inch, 9.5)
         block_height = 0.22 * inch + len(body_lines) * 0.16 * inch + 0.18 * inch
@@ -1558,7 +1598,7 @@ def generate_full_chart_pdf(chart_data, chart_title="Your Vedic Birth Chart"):
             f"{a['display_name']} ({a['abbr']}) {a['degree']:.1f}\u00b0" for a in house_data["aspects"]
         ) or "none"
         paragraph = (f"This house indicates {HOUSE_MEANINGS.get(h, '')} "
-                     f"Placed here: {bodies_text}. Aspected by: {aspects_text}.")
+                     f"Placed here in {house_data['sign']}: {bodies_text}. This house is aspected by: {aspects_text}.")
 
         body_lines = _wrap(paragraph, page_w - 1.5 * inch, 9.5)
         block_height = 0.22 * inch + len(body_lines) * 0.16 * inch + 0.18 * inch
