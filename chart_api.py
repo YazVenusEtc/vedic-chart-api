@@ -693,8 +693,10 @@ def _house_text_content_with_aspects(chart_data):
     already computed onto chart_data["houses"][h]["aspects"] for the
     Houses text section. Each entry becomes a (label, color, is_aspect)
     triple: placements keep their degree and render bold, aspecting
-    planets render as an italic abbreviation only (no degree, since the
-    degree belongs to the aspecting planet's own house, not this one)."""
+    planets render italic (both keep their degree -- an aspecting
+    planet's degree is its own position, in its own house, same as any
+    placement; it's just shown here too since that's the house it's
+    casting its influence onto)."""
     asc_sign = chart_data["ascendant"]["sign"]
     asc_index = SIGNS.index(asc_sign)
     house_sign = {h: SIGNS[(asc_index + h - 1) % 12] for h in range(1, 13)}
@@ -711,7 +713,10 @@ def _house_text_content_with_aspects(chart_data):
         house_data = chart_data["houses"][house_num - 1]
         for a in house_data["aspects"]:
             color = PLANET_COLORS.get(a["name"], "#333333")
-            by_house[house_num].append((a["abbr"], color, True))
+            # No retrograde "R" here, deliberately -- an aspect is always
+            # cast forward regardless of whether the aspecting planet
+            # itself is retrograde, so marking it would be misleading.
+            by_house[house_num].append((f"{a['abbr']} {a['degree']:.1f}\u00b0", color, True))
 
     content = {}
     for house_num in range(1, 13):
@@ -849,13 +854,15 @@ def generate_north_indian_chart_svg(chart_data, canvas_width=1200, canvas_height
                 abbr_part, degree_part = (label, "") if space_idx == -1 else (label[:space_idx], label[space_idx:])
                 planet_name = ABBR_TO_NAME.get(abbr_part, "")
                 if is_aspect:
-                    # An aspecting (not placed) planet -- italic, slightly
-                    # muted, no degree, distinct from bold placements.
+                    # An aspecting (not placed) planet -- italic and
+                    # slightly muted, distinct from bold placements, but
+                    # still shows its own degree.
                     tspans.append(
                         f'<tspan fill="{color}">{prefix}</tspan>'
                         f'<tspan fill="{color}" font-style="italic" fill-opacity="0.82" '
                         f'class="vbc-planet-tspan" data-planet="{planet_name}" '
                         f'style="cursor:pointer">{abbr_part}</tspan>'
+                        f'<tspan fill="{color}" font-style="italic" fill-opacity="0.82">{degree_part}</tspan>'
                     )
                 else:
                     tspans.append(
@@ -891,9 +898,9 @@ def generate_south_indian_chart_svg(chart_data, canvas_width=1200, canvas_height
     smaller than the North Indian chart's for the same content. Keeping
     canvas_width equal to the North Indian canvas's width means the same
     font-size candidates end up visually comparable between the two."""
-    side_margin = canvas_width * 0.05
-    top_clearance = canvas_height * 0.078   # room for the "SEE KEY BELOW" title
-    bottom_margin = canvas_height * 0.05
+    side_margin = canvas_width * 0.02
+    top_clearance = canvas_height * 0.068   # room for the "SEE KEY BELOW" title, plus the (ASC) marker when the Ascendant lands in the top row
+    bottom_margin = canvas_height * 0.02
     size = min(canvas_width - 2 * side_margin, canvas_height - top_clearance - bottom_margin)
     x0 = (canvas_width - size) / 2.0
     y0 = top_clearance
@@ -914,7 +921,13 @@ def generate_south_indian_chart_svg(chart_data, canvas_width=1200, canvas_height
         '</radialGradient>',
         '</defs>',
         f'<rect x="0" y="0" width="{canvas_width}" height="{canvas_height}" fill="white"/>',
-        f'<text x="{canvas_width/2}" y="{canvas_height * 0.07}" text-anchor="middle" '
+        # Positioned relative to top_clearance itself (not a flat canvas_height
+        # fraction) so there's always a real gap before the grid's top edge,
+        # matching the breathing room the North Indian diamond has between
+        # its own title and its top corner -- a flat fraction here previously
+        # landed the text at almost the same y as the grid start, crowding
+        # the two together.
+        f'<text x="{canvas_width/2}" y="{top_clearance * 0.55}" text-anchor="middle" '
         f'font-family="sans-serif" font-size="15" letter-spacing="3" fill="#9C9488">'
         f'SEE KEY BELOW</text>',
     ]
@@ -935,7 +948,7 @@ def generate_south_indian_chart_svg(chart_data, canvas_width=1200, canvas_height
         pts = cells[sign_index]
         bbox = polygon_bbox(pts)
         bbox_w, bbox_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        per_cell[sign_index] = (house_num, bodies, bbox_w * 0.86, bbox_h * 0.80, polygon_centroid(pts))
+        per_cell[sign_index] = (house_num, bodies, bbox_w * 0.95, bbox_h * 0.92, polygon_centroid(pts))
 
     margin_safe = min(canvas_width, canvas_height) * 0.03
 
@@ -1034,6 +1047,7 @@ def generate_south_indian_chart_svg(chart_data, canvas_width=1200, canvas_height
                         f'<tspan fill="{color}" font-style="italic" fill-opacity="0.82" '
                         f'class="vbc-planet-tspan" data-planet="{planet_name}" '
                         f'style="cursor:pointer">{abbr_part}</tspan>'
+                        f'<tspan fill="{color}" font-style="italic" fill-opacity="0.82">{degree_part}</tspan>'
                     )
                 else:
                     tspans.append(
@@ -1267,9 +1281,9 @@ def generate_south_indian_chart_svg_with_transits(natal_chart_data, transit_plan
     transiting planets layered in using the same "T" marker / italic /
     single deep-red-for-all-transits treatment as the North Indian
     overlay."""
-    side_margin = canvas_width * 0.05
-    top_clearance = canvas_height * 0.078
-    bottom_margin = canvas_height * 0.05
+    side_margin = canvas_width * 0.02
+    top_clearance = canvas_height * 0.068
+    bottom_margin = canvas_height * 0.02
     size = min(canvas_width - 2 * side_margin, canvas_height - top_clearance - bottom_margin)
     x0 = (canvas_width - size) / 2.0
     y0 = top_clearance
@@ -1290,7 +1304,13 @@ def generate_south_indian_chart_svg_with_transits(natal_chart_data, transit_plan
         '</radialGradient>',
         '</defs>',
         f'<rect x="0" y="0" width="{canvas_width}" height="{canvas_height}" fill="white"/>',
-        f'<text x="{canvas_width/2}" y="{canvas_height * 0.07}" text-anchor="middle" '
+        # Positioned relative to top_clearance itself (not a flat canvas_height
+        # fraction) so there's always a real gap before the grid's top edge,
+        # matching the breathing room the North Indian diamond has between
+        # its own title and its top corner -- a flat fraction here previously
+        # landed the text at almost the same y as the grid start, crowding
+        # the two together.
+        f'<text x="{canvas_width/2}" y="{top_clearance * 0.55}" text-anchor="middle" '
         f'font-family="sans-serif" font-size="15" letter-spacing="3" fill="#9C9488">'
         f'SEE KEY BELOW</text>',
     ]
@@ -1329,7 +1349,7 @@ def generate_south_indian_chart_svg_with_transits(natal_chart_data, transit_plan
         pts = cells[sign_index]
         bbox = polygon_bbox(pts)
         bbox_w, bbox_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        per_cell[sign_index] = (house_num, bodies, bbox_w * 0.86, bbox_h * 0.80, polygon_centroid(pts))
+        per_cell[sign_index] = (house_num, bodies, bbox_w * 0.95, bbox_h * 0.92, polygon_centroid(pts))
 
     margin_safe = min(canvas_width, canvas_height) * 0.03
 
