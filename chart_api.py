@@ -133,11 +133,11 @@ ASPECT_ANGLE_DEFINITIONS = [
     ("Trine", 120),
     ("Opposition", 180),
 ]
-ASPECT_ANGLE_ORB = 6.0  # degrees of allowed deviation from an exact angle
+ASPECT_ANGLE_ORB = 7.0  # degrees of allowed deviation from an exact angle
 
 # Wider than ASPECT_ANGLE_ORB on purpose -- used only for the Placements
 # section's per-body "significant aspects" listing, not the main
-# Planetary Angles table, which keeps its tighter 6\u00b0 orb.
+# Planetary Angles table, which keeps its tighter 7\u00b0 orb.
 SIGNIFICANT_ASPECT_ORB = 10.0
 
 
@@ -148,7 +148,7 @@ def compute_planetary_aspects(bodies, orb=None):
     found (i.e. within orb), each noting the two bodies, the aspect type,
     and how many degrees off from exact ("orb") it is.
 
-    orb defaults to ASPECT_ANGLE_ORB (the Planetary Angles table's 6\u00b0),
+    orb defaults to ASPECT_ANGLE_ORB (the Planetary Angles table's 7\u00b0),
     but callers can pass a different value -- e.g. the Placements
     section's wider 10\u00b0 "significant aspects" listing -- without
     affecting the default orb used everywhere else."""
@@ -385,7 +385,7 @@ def compute_chart_from_coords(year, month, day, hour, minute, lat, lon, location
 
     # A separate, wider-orb pass just for the Placements section's
     # per-body "significant aspects" listing -- intentionally looser
-    # than the 6\u00b0 orb used for the main Planetary Angles table, so it
+    # than the 7\u00b0 orb used for the main Planetary Angles table, so it
     # surfaces looser-but-still-meaningful aspects a reading would want
     # to know about for each individual planet.
     significant_aspects_raw = compute_planetary_aspects(aspect_bodies, orb=SIGNIFICANT_ASPECT_ORB)
@@ -809,6 +809,14 @@ def generate_north_indian_chart_svg(chart_data, canvas_width=1200, canvas_height
     number_line_height = number_font * 1.2
     body_line_height = body_font * 1.25
 
+    # Grid lines are drawn in their own pass, entirely before any text --
+    # adjacent houses share boundary edges, so if a polygon and the
+    # previous house's text were interleaved in one loop (draw house N's
+    # line, then its text, then house N+1's line...), a shared edge could
+    # get painted back on top of nearby text from the house before it,
+    # since SVG stacks elements in document order. Two clean passes (all
+    # lines, then all text) guarantees every line sits behind every piece
+    # of text, regardless of which houses happen to be next to each other.
     for house_num, pts in houses.items():
         points_str = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
         svg_lines.append(
@@ -816,6 +824,7 @@ def generate_north_indian_chart_svg(chart_data, canvas_width=1200, canvas_height
             f'stroke="{CHART_LINE_COLOR}" stroke-width="1.3"/>'
         )
 
+    for house_num, pts in houses.items():
         _, _, centroid = per_house_geometry[house_num]
         number_text, wrapped_lines = layout[house_num]
 
@@ -997,6 +1006,9 @@ def generate_south_indian_chart_svg(chart_data, canvas_width=1200, canvas_height
     number_line_height = number_font * 1.2
     body_line_height = body_font * 1.25
 
+    # Same two-pass approach as the North Indian generator -- see its
+    # comment for why: every grid line drawn before any text, so a
+    # shared cell edge never paints back over a neighboring cell's text.
     for sign_index, pts in cells.items():
         points_str = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
         svg_lines.append(
@@ -1004,6 +1016,7 @@ def generate_south_indian_chart_svg(chart_data, canvas_width=1200, canvas_height
             f'stroke="{CHART_LINE_COLOR}" stroke-width="1.3"/>'
         )
 
+    for sign_index, pts in cells.items():
         _, _, _, _, centroid = per_cell[sign_index]
         number_text, wrapped_lines = layout[sign_index]
         is_ascendant_cell = (sign_index == asc_index)
@@ -1210,6 +1223,9 @@ def generate_north_indian_chart_svg_with_transits(natal_chart_data, transit_plan
     number_line_height = number_font * 1.2
     body_line_height = body_font * 1.25
 
+    # Two-pass, same reasoning as the plain North Indian generator: all
+    # grid lines before any text, so a shared house edge never paints
+    # back over a neighboring house's text.
     for house_num, pts in houses.items():
         points_str = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
         svg_lines.append(
@@ -1217,6 +1233,7 @@ def generate_north_indian_chart_svg_with_transits(natal_chart_data, transit_plan
             f'stroke="{CHART_LINE_COLOR}" stroke-width="1.3"/>'
         )
 
+    for house_num, pts in houses.items():
         _, _, centroid = per_house_geometry[house_num]
         number_text, wrapped_lines = layout[house_num]
 
@@ -1398,6 +1415,7 @@ def generate_south_indian_chart_svg_with_transits(natal_chart_data, transit_plan
     number_line_height = number_font * 1.2
     body_line_height = body_font * 1.25
 
+    # Same two-pass fix as the other three generators.
     for sign_index, pts in cells.items():
         points_str = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
         svg_lines.append(
@@ -1405,6 +1423,7 @@ def generate_south_indian_chart_svg_with_transits(natal_chart_data, transit_plan
             f'stroke="{CHART_LINE_COLOR}" stroke-width="1.3"/>'
         )
 
+    for sign_index, pts in cells.items():
         _, _, _, _, centroid = per_cell[sign_index]
         number_text, wrapped_lines = layout[sign_index]
         is_ascendant_cell = (sign_index == asc_index)
@@ -2114,7 +2133,7 @@ def generate_full_chart_pdf(chart_data, chart_title="Your Vedic Birth Chart"):
     y -= 0.35 * inch
 
     col_x3 = [0.75 * inch, 3.0 * inch, 5.25 * inch]
-    headers3 = ["Body 1", "Body 2", "Aspect"]
+    headers3 = ["Body 1", "Body 2", "Aspect (0-7 deg orb)"]
     c.setFont("Times-Bold", 9)
     for cx, h in zip(col_x3, headers3):
         c.drawString(cx, y, h)
@@ -2131,7 +2150,7 @@ def generate_full_chart_pdf(chart_data, chart_title="Your Vedic Birth Chart"):
                 c.setFont("Times-Roman", 8)
             c.drawString(col_x3[0], y, f"{a['body1']} ({a['abbr1']})")
             c.drawString(col_x3[1], y, f"{a['body2']} ({a['abbr2']})")
-            c.drawString(col_x3[2], y, a['aspect'])
+            c.drawString(col_x3[2], y, f"{a['aspect']} ({a['orb']:.1f} deg orb)")
             y -= 0.18 * inch
 
     c.save()
