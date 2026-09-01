@@ -873,7 +873,7 @@ def generate_north_indian_chart_svg(chart_data, canvas_width=1200, canvas_height
     return "\n".join(svg_lines)
 
 
-def generate_south_indian_chart_svg(chart_data, canvas_width=1200, canvas_height=1000):
+def generate_south_indian_chart_svg(chart_data, canvas_width=1200, canvas_height=1200):
     """South Indian style: signs fixed to a 4x4 grid (Aries always the
     same cell, etc.), houses rotating around them depending on the
     Ascendant -- the mirror image of the North Indian diamond, where
@@ -881,10 +881,22 @@ def generate_south_indian_chart_svg(chart_data, canvas_width=1200, canvas_height
     (placements + italic aspects) as generate_north_indian_chart_svg;
     only the geometry and which number gets displayed (house, not sign,
     since sign position is now fixed and no longer needs labeling)
-    differ."""
-    size = min(canvas_width - canvas_width * 0.14, canvas_height - canvas_height * 0.20)
+    differ.
+
+    The canvas is square (unlike the North Indian diamond's 1200x1000)
+    and the grid fills nearly all of it -- a square grid dropped into a
+    landscape canvas the way an earlier version of this function did
+    wastes real width as empty margin, which starves the auto-shrink
+    font logic below and makes the South Indian chart's text noticeably
+    smaller than the North Indian chart's for the same content. Keeping
+    canvas_width equal to the North Indian canvas's width means the same
+    font-size candidates end up visually comparable between the two."""
+    side_margin = canvas_width * 0.05
+    top_clearance = canvas_height * 0.078   # room for the "SEE KEY BELOW" title
+    bottom_margin = canvas_height * 0.05
+    size = min(canvas_width - 2 * side_margin, canvas_height - top_clearance - bottom_margin)
     x0 = (canvas_width - size) / 2.0
-    y0 = canvas_height * 0.14
+    y0 = top_clearance
     cells = build_south_indian_cells(x0, y0, size)
     content = _house_text_content_with_aspects(chart_data)
     asc_sign = chart_data["ascendant"]["sign"]
@@ -923,7 +935,7 @@ def generate_south_indian_chart_svg(chart_data, canvas_width=1200, canvas_height
         pts = cells[sign_index]
         bbox = polygon_bbox(pts)
         bbox_w, bbox_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        per_cell[sign_index] = (house_num, bodies, bbox_w * 0.78, bbox_h * 0.70, polygon_centroid(pts))
+        per_cell[sign_index] = (house_num, bodies, bbox_w * 0.86, bbox_h * 0.80, polygon_centroid(pts))
 
     margin_safe = min(canvas_width, canvas_height) * 0.03
 
@@ -1247,15 +1259,20 @@ def generate_north_indian_chart_svg_with_transits(natal_chart_data, transit_plan
 
 
 def generate_south_indian_chart_svg_with_transits(natal_chart_data, transit_planets,
-                                                    canvas_width=1200, canvas_height=1000):
+                                                    canvas_width=1200, canvas_height=1200):
     """South Indian counterpart of generate_north_indian_chart_svg_with_transits
-    -- same fixed-sign grid as generate_south_indian_chart_svg, with
+    -- same fixed-sign grid as generate_south_indian_chart_svg (including
+    the square canvas that keeps its text sized comparably to the North
+    Indian diamond -- see that function's docstring for why), with
     transiting planets layered in using the same "T" marker / italic /
     single deep-red-for-all-transits treatment as the North Indian
     overlay."""
-    size = min(canvas_width - canvas_width * 0.14, canvas_height - canvas_height * 0.20)
+    side_margin = canvas_width * 0.05
+    top_clearance = canvas_height * 0.078
+    bottom_margin = canvas_height * 0.05
+    size = min(canvas_width - 2 * side_margin, canvas_height - top_clearance - bottom_margin)
     x0 = (canvas_width - size) / 2.0
-    y0 = canvas_height * 0.14
+    y0 = top_clearance
     cells = build_south_indian_cells(x0, y0, size)
     content = _house_text_content_with_transits(natal_chart_data, transit_planets)
     asc_sign = natal_chart_data["ascendant"]["sign"]
@@ -1312,7 +1329,7 @@ def generate_south_indian_chart_svg_with_transits(natal_chart_data, transit_plan
         pts = cells[sign_index]
         bbox = polygon_bbox(pts)
         bbox_w, bbox_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        per_cell[sign_index] = (house_num, bodies, bbox_w * 0.78, bbox_h * 0.70, polygon_centroid(pts))
+        per_cell[sign_index] = (house_num, bodies, bbox_w * 0.86, bbox_h * 0.80, polygon_centroid(pts))
 
     margin_safe = min(canvas_width, canvas_height) * 0.03
 
